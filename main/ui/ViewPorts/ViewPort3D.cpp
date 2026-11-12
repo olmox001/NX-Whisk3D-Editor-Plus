@@ -3147,6 +3147,17 @@ bool Viewport3D::RenderABuffer(int outW, int outH, RenderType::Enum pass, std::v
     // fijar el PASE (sin overlay): modo + luces + flags del Core, una sola vez
     RenderType viewPrev = view; bool overlaysPrev = showOverlays;
     bool camPrev = ViewFromCameraActive;
+    extern bool g_showHitbox;
+    extern bool g_showSonidos;
+    extern bool g_w3dHitboxVer;
+    const bool showLightsPrev = g_showLights;
+    const bool showCameraPrev = g_showCamera;
+    const bool showEmptyPrev = g_showEmpty;
+    const bool showParticulasPrev = g_showParticulas;
+    const bool showCurvasPrev = g_showCurvas;
+    const bool showHitboxPrev = g_showHitbox;
+    const bool showSonidosPrev = g_showSonidos;
+    const bool hitboxDebugPrev = g_w3dHitboxVer;
     // el render se hace DESDE la camara activa: si hay camara, forzamos su POV.
     // Sin camara queda la vista del viewport (orbita). La proyeccion sigue con fovDeg (la Camera del editor
     // no tiene lente propio todavia). El gizmo de la camara no sale (showOverlays=false + este flag).
@@ -3154,6 +3165,12 @@ bool Viewport3D::RenderABuffer(int outW, int outH, RenderType::Enum pass, std::v
     view = pass; showOverlays = false;
     ReloadLights();
     g_mostrarOverlays = false; w3dRenderOverlays = false;
+    // Render Image / catture LLM devono essere scene-only: questi helper sono
+    // globali e alcuni oggetti (Empty/Sound/Hitbox) li leggono direttamente,
+    // senza consultare g_mostrarOverlays.
+    g_showLights = false; g_showCamera = false; g_showEmpty = false;
+    g_showParticulas = false; g_showCurvas = false;
+    g_showHitbox = false; g_showSonidos = false; g_w3dHitboxVer = false;
     w3dRenderWireframe   = false;
     w3dRenderSolido      = (pass == RenderType::Solid);
     w3dRenderNormalColor = (pass == RenderType::NormalView);
@@ -3255,6 +3272,9 @@ bool Viewport3D::RenderABuffer(int outW, int outH, RenderType::Enum pass, std::v
     // pero los limpiamos ya por las dudas de que algo dibuje antes)
     view = viewPrev; showOverlays = overlaysPrev; ViewFromCameraActive = camPrev;
     w3dRenderAlpha = false; w3dRenderSinLuz = false; w3dRenderNormalColor = false;
+    g_showLights = showLightsPrev; g_showCamera = showCameraPrev; g_showEmpty = showEmptyPrev;
+    g_showParticulas = showParticulasPrev; g_showCurvas = showCurvasPrev;
+    g_showHitbox = showHitboxPrev; g_showSonidos = showSonidosPrev; g_w3dHitboxVer = hitboxDebugPrev;
     ReloadLights();
 
     // (GL lee de ABAJO hacia arriba: las filas al derecho)

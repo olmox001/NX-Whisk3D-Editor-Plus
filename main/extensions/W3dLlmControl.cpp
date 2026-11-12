@@ -689,6 +689,27 @@ static bool ContieneObjeto(Object* arbol, Object* buscado) {
     return false;
 }
 
+static void OcultarRamaCompleta(Object* nodo, std::vector<Object*>& ocultados) {
+    if (!nodo) return;
+    if (nodo->visible) {
+        nodo->visible = false;
+        ocultados.push_back(nodo);
+    }
+    for (size_t i = 0; i < nodo->Childrens.size(); i++)
+        OcultarRamaCompleta(nodo->Childrens[i], ocultados);
+}
+
+static void OcultarFueraDeSubarbol(Object* nodo, Object* root,
+                                   std::vector<Object*>& ocultados) {
+    if (!nodo || nodo == root) return;
+    if (ContieneObjeto(nodo, root)) {
+        for (size_t i = 0; i < nodo->Childrens.size(); i++)
+            OcultarFueraDeSubarbol(nodo->Childrens[i], root, ocultados);
+        return;
+    }
+    OcultarRamaCompleta(nodo, ocultados);
+}
+
 static Resultado HerrSubjectCapture(const JVal* args) {
     Resultado r;
     const std::string rootName = Texto(Campo(args, "root"));
@@ -698,6 +719,13 @@ static Resultado HerrSubjectCapture(const JVal* args) {
     if (path.empty()) { r.error = true; r.texto = "subject_capture: falta path"; return r; }
     if (!Viewport3DActive) Viewport3DActive = PrimerViewport3D(rootViewport);
     if (!Viewport3DActive) { r.error = true; r.texto = "subject_capture: no hay viewport 3D en el layout"; return r; }
+
+    // La captura deve poter ispezionare anche un oggetto nascosto: rendiamo
+    // temporaneamente visibili il soggetto e SOLO la sua catena di parent.
+    std::vector<Object*> forzadosVisibles;
+    for (Object* q = root; q && q != SceneCollection; q = q->Parent) {
+        if (!q->visible) { q->visible = true; forzadosVisibles.push_back(q); }
+    }
 
     DeseleccionarTodo();
     SeleccionarSubarbol(root);
@@ -716,13 +744,8 @@ static Resultado HerrSubjectCapture(const JVal* args) {
     // La imagen de inspeccion no debe contener luces/camaras/gizmos ajenos al sujeto.
     std::vector<Object*> ocultados;
     if (SceneCollection) {
-        for (size_t i = 0; i < SceneCollection->Childrens.size(); i++) {
-            Object* top = SceneCollection->Childrens[i];
-            if (ContieneObjeto(top, root) || !top->visible) continue;
-            if (top->getType() == ObjectType::light || top->getType() == ObjectType::camera) continue;
-            top->visible = false;
-            ocultados.push_back(top);
-        }
+        for (size_t i = 0; i < SceneCollection->Childrens.size(); i++)
+            OcultarFueraDeSubarbol(SceneCollection->Childrens[i], root, ocultados);
     }
     const bool overlaysPrev = Viewport3DActive->showOverlays;
     Viewport3DActive->SetShowOverlays(false);
@@ -740,13 +763,27 @@ static Resultado HerrSubjectCapture(const JVal* args) {
     const JVal* tv = Campo(args, "threshold");
     const int threshold = (tv && tv->tipo == 1) ? (int)tv->num : 28;
 
+    RenderType::Enum capturePass = RenderType::Rendered;
+    const std::string mode = Texto(Campo(args, "mode"));
+    if (mode == "material") capturePass = RenderType::MaterialPreview;
+    else if (mode == "solid") capturePass = RenderType::Solid;
+    else if (mode == "normal") capturePass = RenderType::NormalView;
+    else if (!mode.empty() && mode != "rendered") {
+        r.error = true; r.texto = "subject_capture: mode desconocido (rendered|material|solid|normal)";
+        for (size_t i = 0; i < ocultados.size(); i++) ocultados[i]->visible = true;
+        for (size_t i = 0; i < forzadosVisibles.size(); i++) forzadosVisibles[i]->visible = false;
+        Viewport3DActive->SetShowOverlays(overlaysPrev);
+        return r;
+    }
+
     std::vector<unsigned char> rgba;
     Camera* cameraPrev = CameraActive;
     CameraActive = NULL; // RenderABuffer: senza camera attiva usa l'orbita appena inquadrata del viewport
-    const bool rendered = Viewport3DActive->RenderABuffer(outW, outH, RenderType::Rendered, rgba);
+    const bool rendered = Viewport3DActive->RenderABuffer(outW, outH, capturePass, rgba);
     CameraActive = cameraPrev;
     Viewport3DActive->SetShowOverlays(overlaysPrev);
     for (size_t i = 0; i < ocultados.size(); i++) ocultados[i]->visible = true;
+    for (size_t i = 0; i < forzadosVisibles.size(); i++) forzadosVisibles[i]->visible = false;
     if (!rendered || rgba.size() != (size_t)outW * outH * 4) {
         r.error = true; r.texto = "subject_capture: RenderABuffer fallo"; return r;
     }
@@ -834,6 +871,8 @@ static Resultado HerrSubjectMultiView(const JVal* args) {
         a.obj["max_width"]=JNum(w);
         a.obj["margin_pct"]=JNum(margin);
         a.obj["threshold"]=JNum(threshold);
+        const JVal* modeArg=Campo(args,"mode");
+        if(modeArg&&modeArg->tipo==2) a.obj["mode"]=JStr(modeArg->str);
         Resultado one=HerrSubjectCapture(&a);
         if(one.error){
             r.error=true;r.partialSuccess=ok>0;
@@ -2313,8 +2352,8 @@ static const char* kHerramientas = R"JSON([
 {"name":"scene_batch","description":"Esegue in una singola chiamata operazioni create/transform/transform_world/parent_keep/select/visibility/material_create/material_assign/physics e restituisce solo contatori. Accetta nomi inglesi o spagnoli e riferimenti @serial; ideale per rig, materiali e corpi fisici grandi.","inputSchema":{"type":"object","properties":{"ops":{"type":"array","items":{"type":"object"}}},"required":["ops"]}},
 {"name":"captura","description":"Una imagen PNG de lo que muestra el editor, para ver el resultado. Por defecto solo la vista 3D activa; con zona='ventana', el editor entero. Se achica hasta ancho_max pixeles (800 si no se dice).","inputSchema":{"type":"object","properties":{"zona":{"type":"string","enum":["vista3d","ventana"]},"ancho_max":{"type":"integer"}}}},
 {"name":"capture_file","description":"Guarda una captura PNG ligera y devuelve solo path/dimensiones/bytes. Por defecto recorta automaticamente la superficie util respecto del fondo y limita a 480 px; sin base64.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"zona":{"type":"string","enum":["3d","ventana"]},"ancho_max":{"type":"integer","minimum":64},"crop":{"type":"boolean"},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["path"]}},
-{"name":"subject_capture","description":"Inquadra direttamente un sottoalbero nel viewport 3D senza dipendere dal focus GUI, sceglie vista front/right/top/back/left/bottom, ritaglia automaticamente la superficie utile e salva un PNG leggero senza base64.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"path":{"type":"string"},"view":{"type":"string","enum":["front","right","top","back","left","bottom"]},"max_width":{"type":"integer","minimum":64},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["root","path"]}},
-{"name":"subject_multiview","description":"Genera in una chiamata viste auto-inquadrate e auto-croppate del solo sottoalbero. Default: front/right/back/left/top. Scrive base_path_<view>.png e non invia base64.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"base_path":{"type":"string"},"views":{"type":"array","items":{"type":"string","enum":["front","right","top","back","left","bottom"]}},"max_width":{"type":"integer","minimum":64},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["root","base_path"]}},
+{"name":"subject_capture","description":"Inquadra e isola realmente un sottoalbero, sceglie vista e pass rendered/material/solid/normal, ritaglia la superficie utile e salva PNG senza base64.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"path":{"type":"string"},"view":{"type":"string","enum":["front","right","top","back","left","bottom"]},"mode":{"type":"string","enum":["rendered","material","solid","normal"]},"max_width":{"type":"integer","minimum":64},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["root","path"]}},
+{"name":"subject_multiview","description":"Genera in una chiamata viste isolate, auto-inquadrate e auto-croppate; supporta pass rendered/material/solid/normal e non invia base64.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"base_path":{"type":"string"},"views":{"type":"array","items":{"type":"string","enum":["front","right","top","back","left","bottom"]}},"mode":{"type":"string","enum":["rendered","material","solid","normal"]},"max_width":{"type":"integer","minimum":64},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["root","base_path"]}},
 {"name":"viewport_grid","description":"Sostituisce il layout attuale con 4 veri Viewport3D simultanei in griglia 2x2: front/right/back/top, ortografici e auto-inquadrati sul sottoalbero. Non genera screenshot: cambia davvero l'interfaccia editor.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"root_ref":{"type":["string","number"]}}}},
 {"name":"loft_create","description":"Crea una vera mesh editabile continua da sezioni ellittiche misurate. sections contiene righe [x,y,z,rA,rB]; axis=z usa raggi width/depth, axis=x usa depth/height, axis=y usa width/height. Utile per teste, toraci, arti e orecchie senza impilare primitive.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"parent":{"type":"string"},"axis":{"type":"string","enum":["x","y","z"]},"sides":{"type":"integer","minimum":6,"maximum":96},"caps":{"type":"boolean"},"sections":{"type":"array","items":{"type":"array","items":{"type":"number"},"minItems":5,"maxItems":5}}},"required":["name","sections"]}},
 {"name":"fur_generate","description":"Genera una singola mesh di pelo geometrico dalla superficie di una mesh, campionando le facce e orientando ogni ciuffo dalle normali. Parametri: samples_per_face 1..8, length, width, droop. Il pelo eredita transform e materiale della mesh sorgente.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"name":{"type":"string"},"samples_per_face":{"type":"integer","minimum":1,"maximum":8},"length":{"type":"number"},"width":{"type":"number"},"droop":{"type":"number"}},"required":["source","name"]}},
