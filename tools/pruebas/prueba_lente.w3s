@@ -17,6 +17,9 @@
 #  plano lejano segun el tick: largo -> corto -> los tres a la vez.
 #  Se verifica por PIXELES, que es lo unico que prueba que el recorte ocurrio.
 # ==========================================================================
+# Los asserts proyectan puntos del mundo a pixeles: una ventana fija evita que
+# el layout heredado del host cambie el texel medido sin cambiar la escena.
+ventana 1280 720
 abrirw3d prueba_lente.w3d
 loadtex
 # el viewport dibuja POR la camara de la escena: si no, el recorte que se mide

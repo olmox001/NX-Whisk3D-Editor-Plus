@@ -32,6 +32,9 @@
 #  Correr DESDE ESTA CARPETA:
 #    ../../platform/linux/build/whisk3d --script prueba_sombra_z.w3s
 # ===========================================================================
+# Los asserts proyectan puntos de mundo a pixeles: fijar el layout evita que una
+# ventana heredada del host cambie que texel cae bajo el punto de referencia.
+ventana 1280 720
 abrirw3d prueba_sombra_z.w3d
 loadtex
 

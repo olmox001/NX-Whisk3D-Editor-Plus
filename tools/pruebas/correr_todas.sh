@@ -51,7 +51,7 @@ for f in prueba_*.w3s; do
     fi
 done
 
-ok=0; fallo=0; fallidas=(); sincorpus=0
+ok=0; skip=0; fallo=0; fallidas=(); salteadas=(); sincorpus=0
 for f in "${pruebas[@]}"; do
     printf '%-34s ' "$f"
     # -k: SDL atrapa el SIGTERM (lo vuelve un evento de salida que el harness no mira mientras
@@ -61,11 +61,18 @@ for f in "${pruebas[@]}"; do
     salida=$(timeout -k 10 "$TIMEOUT" "$W3D_BIN" --script "$f" 2>&1)
     cod=$?
     if [ $cod -eq 0 ]; then
-        # partes salteadas porque no esta el corpus de oro (gitignoreado): verde, pero se dice
-        sc=$(echo "$salida" | grep -c "SIN CORPUS:")
-        if [ "$sc" -gt 0 ]; then echo "OK ($sc parte(s) SIN CORPUS)"; else echo "OK"; fi
-        sincorpus=$((sincorpus + sc))
-        ok=$((ok + 1))
+        # Una capacidad opcional ausente no es un exito: el harness la marca TEST SKIP.
+        motivo_skip=$(echo "$salida" | grep "^=== TEST SKIP:" | tail -1 | sed "s/^=== TEST SKIP: //; s/ ===$//")
+        if [ -n "$motivo_skip" ]; then
+            echo "SKIP ($motivo_skip)"
+            skip=$((skip + 1)); salteadas+=("$f")
+        else
+            # partes salteadas porque no esta el corpus de oro (gitignoreado): verde, pero se dice
+            sc=$(echo "$salida" | grep -c "SIN CORPUS:")
+            if [ "$sc" -gt 0 ]; then echo "OK ($sc parte(s) SIN CORPUS)"; else echo "OK"; fi
+            sincorpus=$((sincorpus + sc))
+            ok=$((ok + 1))
+        fi
     else
         if [ $cod -eq 124 ] || { [ $cod -eq 137 ] && [ $((SECONDS - t0)) -ge "$TIMEOUT" ]; }; then
             echo "TIMEOUT (${TIMEOUT}s)"
@@ -82,7 +89,10 @@ for f in "${pruebas[@]}"; do
 done
 
 echo "--------------------------------------------------"
-echo "$ok OK, $fallo FALLA(S), de $((ok + fallo)) pruebas"
+echo "$ok OK, $skip SKIP, $fallo FALLA(S), de $((ok + skip + fallo)) pruebas"
+if [ $skip -gt 0 ]; then
+    printf '  skip: %s\n' "${salteadas[@]}"
+fi
 if [ $sincorpus -gt 0 ]; then
     echo "AVISO: $sincorpus parte(s) no se probaron: falta formato/corpus (gitignoreado; copialo o"
     echo "       corre con W3D_CORPUS_OBLIGATORIO=1 para que su falta sea una falla)"

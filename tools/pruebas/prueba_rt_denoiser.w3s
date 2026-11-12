@@ -20,12 +20,8 @@ vporbita 0 0.5 0 12 -35 -23
 rtdenoiser 0
 rtrender 96 72 1
 rtruido 10 50 86 70 mayorque 4
-# Open Image Denoise (cualquier PC): mucho menos ruido
-rtdenoiser 1 si
-rtdenoiser 1
-rtrender 96 72 1
-rtruido 10 50 86 70 menorque 3
-# OptiX (solo con una placa NVIDIA: sin ella la prueba termina aca, bien)
-rtdenoiser 2 saltar
+# Open Image Denoise: si la libreria opcional no esta, esta prueba queda SKIP;
+# si esta, se exige que realmente reduzca el ruido.
+rtdenoiser 1 saltar
 rtrender 96 72 1
 rtruido 10 50 86 70 menorque 3

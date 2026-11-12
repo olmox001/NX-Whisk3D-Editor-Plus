@@ -14,6 +14,7 @@ ProgressPopup* progressPopup = NULL;
 void (*LayoutSwapBuffers)() = NULL; // lo setea cada plataforma (PC: SDL_GL_SwapWindow)
 
 static bool  g_progresoActivo = false; // entre Iniciar y Fin: ProgresoActualizar dibuja; afuera es no-op
+static bool  g_progresoDibujo = true;  // false: operacion attiva, ma feedback grafico disabilitato (harness/headless)
 static float g_progresoUltimo = -1.0f; // ultimo frac dibujado (throttle: no redibujar por cada cara)
 
 ProgressPopup::ProgressPopup() : PopUpBase("Progress") {
@@ -135,7 +136,12 @@ static void ProgresoDibujarTodo() {
 }
 
 void ProgresoIniciar(const std::string& msg) {
-    if (!LayoutSwapBuffers) return; // sin hook de swap (ej: harness sin GUI): no-op
+    if (!LayoutSwapBuffers || !g_progresoDibujo) {
+        // L'operazione resta logicamente in progresso, ma nessun feedback grafico/swap.
+        g_progresoActivo = true;
+        g_progresoUltimo = 0.0f;
+        return;
+    }
     W3dDockProgreso(0.0f);          // EXTRA: barra en el icono del dock (mismo avance, no una cuenta aparte)
     if (!progressPopup) progressPopup = new ProgressPopup();
     progressPopup->mensaje = msg;
@@ -149,7 +155,7 @@ void ProgresoIniciar(const std::string& msg) {
 }
 
 void ProgresoActualizar(float frac) {
-    if (!g_progresoActivo || !progressPopup) return;          // no-op fuera de una operacion con barra
+    if (!g_progresoActivo || !g_progresoDibujo || !progressPopup) return;
     if (frac < 1.0f && frac < g_progresoUltimo + 0.015f) return; // throttle: ~1 frame cada 1.5% (no por cada cara)
     g_progresoUltimo = frac;
     progressPopup->frac = frac;
@@ -163,7 +169,7 @@ void ProgresoActualizar(float frac) {
 // El render por TILES pisa todo el framebuffer en cada tile -> la barra sola no alcanza (el fondo del popup
 // ya no esta). Sin throttle: cada tile es un paso grueso (en el N95, lento, se ve el avance bien).
 void ProgresoActualizarFull(float frac) {
-    if (!g_progresoActivo || !progressPopup) return;
+    if (!g_progresoActivo || !g_progresoDibujo || !progressPopup) return;
     g_progresoUltimo = frac;
     progressPopup->frac = frac;
     W3dDockProgreso(frac);
@@ -178,6 +184,8 @@ void ProgresoFin() {
 }
 
 bool ProgresoActivo() { return g_progresoActivo; }
+void ProgresoDibujoHabilitar(bool on) { g_progresoDibujo = on; }
+bool ProgresoDibujoHabilitado() { return g_progresoDibujo; }
 
 // ---------------- la barra de "Compilar juego" ----------------
 // El export de modelos usa esta barra en modo MODAL-bloqueante (clear negro + swap propio) porque esa operacion congela

@@ -9,7 +9,7 @@ frame 2
 objmove 1 0 0
 keychan 0 0
 vpvista solid
-vporbita 0 0 0 12 0 0
+vporbita 0 0 0 12 0 0 orto
 vectores quieto 160 120
 vectores 160 120 objeto 1.5 /tmp/w3d_vectores.png
 # del 2 al 3 no hay clave nueva: queda quieto (dx = dy = 0)

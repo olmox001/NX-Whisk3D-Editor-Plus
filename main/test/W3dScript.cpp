@@ -361,6 +361,7 @@ static std::string W3dDebugFile(const std::string& name){
 // limpio. Asi el camino de "salteo con aviso" se prueba tambien en la maquina que SI lo tiene.
 // un comando pidio terminar el script ACA y darlo por bueno (lo que sigue no aplica en esta plataforma)
 static bool gScriptTerminarOk = false;
+static std::string gScriptSalteo;
 static bool g_simularSinCorpus = false;
 static int  g_corpusSalteos = 0;      // partes salteadas desde el ultimo 'simularsincorpus 1'
 
@@ -5890,7 +5891,7 @@ bool W3dRunCommand(const std::string& linea, std::string& err) {
         if (!elegido) printf("      [partinfo] %d emisor(es)\n", np);
         return true;
     }
-    // ---- vporbita <x> <y> <z> [dist] : apunta la ORBITA del viewport 3D a ese punto
+    // ---- vporbita <x> <y> <z> [dist] [pitch yaw [orto|persp]] : apunta la ORBITA del viewport 3D a ese punto
     //      (pivot + distancia). Para las pruebas de pixeles (partpx) en proyectos cuyo
     //      layout guardado mira a otro lado. ----
     if (cmd == "vporbita") {
@@ -5901,6 +5902,8 @@ bool W3dRunCommand(const std::string& linea, std::string& err) {
         // pixeles no puede depender del layout guardado del usuario.
         float pitch = 0, yaw = 0; bool hayAng = false;
         if (ss >> pitch) { ss >> yaw; hayAng = true; }
+        std::string proyeccion;
+        ss >> proyeccion;
         extern Viewport3D* Viewport3DActive;
         if (!rootViewport) { err = "vporbita: no hay layout de viewports"; return false; }
         rootViewport->Render();   // puebla Viewport3DActive
@@ -5910,9 +5913,15 @@ bool W3dRunCommand(const std::string& linea, std::string& err) {
         vp->pivot = Vector3(x, y, z);
         if (dist > 0.0f) vp->orbitDistance = dist;
         if (hayAng) vp->viewRot = Quaternion::FromEulerYXZ(pitch, yaw, 0.0f);
+        if (!proyeccion.empty()) {
+            if (proyeccion == "orto") vp->orthographic = true;
+            else if (proyeccion == "persp") vp->orthographic = false;
+            else { err = "vporbita: proyeccion desconocida '" + proyeccion + "' (orto|persp)"; return false; }
+        }
         vp->RecalcOrbitPosition();
-        printf("      [vporbita] pivot=(%g, %g, %g) dist=%g%s\n", x, y, z, vp->orbitDistance,
-               hayAng ? " (angulos fijados)" : "");
+        printf("      [vporbita] pivot=(%g, %g, %g) dist=%g%s%s\n", x, y, z, vp->orbitDistance,
+               hayAng ? " (angulos fijados)" : "",
+               proyeccion.empty() ? "" : (vp->orthographic ? " ortografica" : " perspectiva"));
         return true;
     }
     // ---- partpx <emisor> <u> <v> [r g b [tol] | fondo [tol] | fondomas r g b [tol]] :
@@ -7878,6 +7887,7 @@ bool W3dRunCommand(const std::string& linea, std::string& err) {
     if (cmd == "sombreadopixel") {
         if (!w3dEngine::SombreadoPorPixelSoportado()) {
             printf("      [sombreadopixel] este backend no tiene shaders: el resto de la prueba no aplica\n");
+            gScriptSalteo = "backend sin sombreado por pixel";
             gScriptTerminarOk = true;
         }
         return true;
@@ -32923,8 +32933,11 @@ bool W3dRunCommand(const std::string& linea, std::string& err) {
         int d = 0; std::string esp; ss >> d >> esp;
         const bool hay = W3dDenoiserDisponible(d);
         printf("      [rtdenoiser] %d (%s): %s en esta maquina\n", d, W3dDenoiserNombre(d), hay ? "esta" : "NO esta");
-        if (esp == "saltar") {   // (no esta en esta maquina: lo que sigue de la prueba no aplica, termina bien)
-            if (!hay) gScriptTerminarOk = true; else { g_rt.denoiser = d; RTInvalidar(); }
+        if (esp == "saltar") {   // capacidad opcional: si falta, la prueba se reporta SKIP (no OK)
+            if (!hay) {
+                gScriptSalteo = std::string("denoiser no disponible: ") + W3dDenoiserNombre(d);
+                gScriptTerminarOk = true;
+            } else { g_rt.denoiser = d; RTInvalidar(); }
             return true;
         }
         if (esp == "si" && !hay) { err = "rtdenoiser: no esta"; return false; }
@@ -32939,7 +32952,14 @@ bool W3dRunCommand(const std::string& linea, std::string& err) {
         int on = 1; std::string esp; ss >> on >> esp;
         const bool hay = RTGpuDisponible();
         printf("      [rtgpu] %s: %s%s\n", on ? "GPU" : "CPU", hay ? RTGpuNombre() : "sin GPU con Vulkan", RTGpuConNucleosRT() ? " (nucleos RTX)" : "");
-        if (on && !hay) { if (esp == "saltar") { gScriptTerminarOk = true; return true; } err = "rtgpu: no hay GPU con Vulkan"; return false; }
+        if (on && !hay) {
+            if (esp == "saltar") {
+                gScriptSalteo = "GPU de ray tracing no disponible";
+                gScriptTerminarOk = true;
+                return true;
+            }
+            err = "rtgpu: no hay GPU con Vulkan"; return false;
+        }
         g_rt.gpu = on != 0;
         RTInvalidar();
         return true;
@@ -33349,7 +33369,10 @@ bool W3dRunCommand(const std::string& linea, std::string& err) {
             std::string q; ss >> q;
             const bool hay = w3dEngine::ShadersEscritos();
             printf("      [matshader] este backend %s shaders escritos\n", hay ? "TIENE" : "no tiene");
-            if ((q == "hay") != hay) gScriptTerminarOk = true;
+            if ((q == "hay") != hay) {
+                gScriptSalteo = hay ? "variante para backend sin shaders escritos" : "backend sin shaders escritos";
+                gScriptTerminarOk = true;
+            }
             return true;
         }
         Material* mat = ScriptActiveMaterial();
@@ -40475,8 +40498,17 @@ bool W3dRunCommand(const std::string& linea, std::string& err) {
 // ============================================================================
 bool W3dRunScript(const std::string& path) {
     gScriptTerminarOk = false;
+    gScriptSalteo.clear();
     std::ifstream f(path.c_str());
     if (!f) { printf("FALLO: no se pudo abrir el script '%s'\n", path.c_str()); return false; }
+
+    // La barra di progresso e' solo feedback UI. Nel runner --script il main loop
+    // AppKit non gira durante un import bloccante, quindi un Cocoa swap del popup puo'
+    // attendere indefinitamente. Disabilitiamo SOLO il disegno del progresso; gli swap
+    // richiesti dai benchmark restano attivi e vengono quindi ancora misurati.
+    const bool progresoDibujoPrev = ProgresoDibujoHabilitado();
+    ProgresoDibujoHabilitar(false);
+
     printf("=== W3dScript: %s ===\n", path.c_str()); fflush(stdout);
     // las PREFERENCIAS del usuario (config.ini) no tienen que cambiar lo que mide una prueba: con el Auto Key prendido
     // un objmove ya keyeaba y el keychan siguiente BORRABA esa clave (las pruebas de movimiento fallaban en la PC del
@@ -40506,9 +40538,15 @@ bool W3dRunScript(const std::string& path) {
             if (gScriptTerminarOk) break;
         } else {
             printf("FALLO [%2d] %s\n           -> %s\n", nLinea, t.c_str(), err.c_str()); fflush(stdout);
+            ProgresoDibujoHabilitar(progresoDibujoPrev);
             return false;                               // corta al primer fallo
         }
     }
-    printf("=== TEST OK: %d comandos ===\n", nOk); fflush(stdout);
+    if (!gScriptSalteo.empty())
+        printf("=== TEST SKIP: %s (%d comandos ejecutados) ===\n", gScriptSalteo.c_str(), nOk);
+    else
+        printf("=== TEST OK: %d comandos ===\n", nOk);
+    fflush(stdout);
+    ProgresoDibujoHabilitar(progresoDibujoPrev);
     return true;
 }

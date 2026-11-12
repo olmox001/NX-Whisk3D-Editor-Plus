@@ -524,9 +524,11 @@ static bool CmdCargaBench(std::istringstream& ss, std::string& err) {
             continue;
         }
         else if (c == "fugakb") {
-            // sin medida (fuera de glibc) no se asserta: no es una falla del proyecto
-            if (fugaKB < 0 && PrHeapKb() < 0) continue;
+            // El contrato del comando no depende de que este SO exponga una medida de heap:
+            // con menos de tres aperturas no existe una muestra valida de fuga.
             if (med.size() < 3) { err = "cargabench: fugakb necesita n >= 3 (la primera vuelta se descarta)"; return false; }
+            // Sin metrica de heap se omite SOLO la comparacion cuantitativa.
+            if (fugaKB < 0 && PrHeapKb() < 0) continue;
             if ((double)fugaKB > v) {
                 char b[200];
                 snprintf(b, sizeof(b), "cargabench: cada reapertura deja %ld KB de heap vivo (cota %.0f KB): algo del "

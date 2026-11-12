@@ -1,0 +1,17 @@
+# ==========================================================================
+#  DENOISER OPTIX (NVIDIA), separado de OIDN para que una dependencia opcional
+#  ausente no esconda la cobertura de la otra. Sin OptiX/NVIDIA: SKIP explicito.
+# ==========================================================================
+add plane
+objscale 6 1 6
+add cube
+objmove 0 1 0
+addlight
+objmove 2 4 -2
+rtopt 1 1 1 1
+rtlight 2 1 0
+vpvista rendered
+vporbita 0 0.5 0 12 -35 -23
+rtdenoiser 2 saltar
+rtrender 96 72 1
+rtruido 10 50 86 70 menorque 3

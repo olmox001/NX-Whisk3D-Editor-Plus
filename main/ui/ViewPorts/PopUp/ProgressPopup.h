@@ -40,6 +40,10 @@ void ProgresoActualizarFull(float frac);      // como Actualizar pero redibuja e
                                               // para operaciones que PISAN el framebuffer (render por tiles)
 void ProgresoFin();                           // cierra la barra
 bool ProgresoActivo();                        // true entre Iniciar y Fin (lo usa la red de seguridad del dock)
+// Feedback grafico del progreso. False conserva la operacion/estado ma non disegna
+// ne presenta frame: utile per harness/headless, senza toccare gli swap dei benchmark.
+void ProgresoDibujoHabilitar(bool on);
+bool ProgresoDibujoHabilitado();
 
 // ---- overlay NO MODAL (el build de "Compilar juego") ----
 // El MISMO widget/estetica que la barra modal del export, pero dibujado DENTRO del
