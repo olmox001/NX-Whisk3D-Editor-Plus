@@ -604,6 +604,33 @@ static Resultado HerrTransformar(const JVal* args) {
     return r;
 }
 
+static Resultado HerrObjectCreate(const JVal* args) {
+    const std::string tipo = Texto(Campo(args, "tipo"));
+    Resultado r = HerrAgregar(tipo);
+    if (r.error) return r;
+
+    std::string out = r.texto + "\n";
+    const std::string nombre = Texto(Campo(args, "nombre"));
+    if (!nombre.empty()) {
+        Resultado rn = HerrComandos("objname " + nombre);
+        out += rn.texto;
+        if (rn.error) { rn.texto = out; return rn; }
+    }
+
+    if (Campo(args, "posicion") || Campo(args, "rotacion") || Campo(args, "escala")) {
+        Resultado rt = HerrTransformar(args);
+        out += rt.texto;
+        if (rt.error) { rt.texto = out; return rt; }
+    } else if (ObjActivo) {
+        std::string tree;
+        Arbol(ObjActivo, 0, tree);
+        out += "final:\n" + tree;
+    }
+
+    r.texto = out;
+    return r;
+}
+
 static Resultado HerrImportar(const std::string& ruta) {
     Resultado r;
     if (ruta.empty()) { r.error = true; r.texto = "falta la ruta"; return r; }
@@ -676,7 +703,7 @@ static const char* const kHerramientasNativas[] = {
     "workspace_status", "session_open", "session_plan", "session_switch", "session_close",
     "task_open", "task_switch", "task_suspend", "task_resume", "task_commit", "task_close",
     "session_test", "menu_execute", "shortcut", "input",
-    "escena", "captura", "agregar_objeto", "seleccionar", "transformar",
+    "escena", "captura", "object_create", "agregar_objeto", "seleccionar", "transformar",
     "borrar_seleccion", "deshacer", "abrir_proyecto", "guardar_proyecto",
     "importar_modelo", "command", "comando"
 };
@@ -843,7 +870,7 @@ static Resultado DesdeWorkspace(const W3dLlmWorkspaceResult& w) {
 
 static bool HerramientaMuta(const std::string& nombre) {
     return nombre == "menu_execute" || nombre == "shortcut" || nombre == "input" ||
-           nombre == "agregar_objeto" || nombre == "seleccionar" || nombre == "transformar" ||
+           nombre == "object_create" || nombre == "agregar_objeto" || nombre == "seleccionar" || nombre == "transformar" ||
            nombre == "borrar_seleccion" || nombre == "deshacer" ||
            nombre == "abrir_proyecto" || nombre == "guardar_proyecto" ||
            nombre == "importar_modelo" || nombre == "command" || nombre == "comando";
@@ -1324,6 +1351,7 @@ static const char* kHerramientas = R"JSON([
 {"name":"input","description":"Inject generic editor input through the real SDL input path. Types: key (valor like Ctrl+S), mouse_move, mouse_button, wheel. This is the unrestricted UI fallback when no semantic command exists.","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["key","mouse_move","mouse_button","wheel"]},"valor":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},"dx":{"type":"integer"},"dy":{"type":"integer"},"boton":{"type":"string","enum":["left","middle","right"]},"down":{"type":"boolean"}},"required":["tipo"]}},
 {"name":"escena","description":"El arbol de objetos de la escena de Whisk3D: nombre, tipo, posicion, rotacion (euler en grados), escala, y cual esta seleccionado y cual es el activo. Las coordenadas son las del panel Propiedades: Z para arriba.","inputSchema":{"type":"object","properties":{}}},
 {"name":"captura","description":"Una imagen PNG de lo que muestra el editor, para ver el resultado. Por defecto solo la vista 3D activa; con zona='ventana', el editor entero. Se achica hasta ancho_max pixeles (800 si no se dice).","inputSchema":{"type":"object","properties":{"zona":{"type":"string","enum":["vista3d","ventana"]},"ancho_max":{"type":"integer"}}}},
+{"name":"object_create","description":"Crea una primitiva, la nombra y aplica posicion/rotacion/escala en una sola llamada. Devuelve el estado final del objeto; usa coordenadas del panel Propiedades (Z arriba).","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["cube","plane","circle","uvsphere","cone","cylinder","vertex","empty","camera","light"]},"nombre":{"type":"string"},"posicion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotacion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"escala":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["tipo","nombre"]}},
 {"name":"agregar_objeto","description":"Agrega un objeto en el cursor 3D, como el menu Add. Queda seleccionado y activo.","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["cube","plane","circle","uvsphere","cone","cylinder","vertex","empty","camera","light"]}},"required":["tipo"]}},
 {"name":"seleccionar","description":"Selecciona un objeto por su nombre y lo deja activo (las herramientas que no reciben nombre actuan sobre el activo). Con agregar=true suma a la seleccion; sin nombre, deselecciona todo.","inputSchema":{"type":"object","properties":{"nombre":{"type":"string"},"agregar":{"type":"boolean"}}}},
 {"name":"transformar","description":"Cambia la posicion, la rotacion (euler en grados) o la escala de un objeto (por nombre, o el activo), con las coordenadas del panel Propiedades (Z para arriba). Solo cambia lo que se pasa. Se deshace con Ctrl+Z.","inputSchema":{"type":"object","properties":{"nombre":{"type":"string"},"posicion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotacion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"escala":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}}}},
@@ -1384,6 +1412,7 @@ static Resultado Llamar(const std::string& nombre, const JVal* args) {
         const JVal* am = Campo(args, "ancho_max");
         return HerrCaptura(Texto(Campo(args, "zona")) != "ventana", (am && am->tipo == 1) ? (int)am->num : 800);
     }
+    if (nombre == "object_create") return HerrObjectCreate(args);
     if (nombre == "agregar_objeto") return HerrAgregar(Texto(Campo(args, "tipo")));
     if (nombre == "seleccionar") {
         const JVal* ag = Campo(args, "agregar");
