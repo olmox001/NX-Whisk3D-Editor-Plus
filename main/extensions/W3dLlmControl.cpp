@@ -24,6 +24,7 @@
 #include "io/JsonW3d.h"            // JVal (el arbol del JSON)
 #include "io/lectura-escritura.h"  // ImportModeloPorExtension
 #include "objects/Objects.h"
+#include "objects/ObjectMode.h"
 #include "ViewPorts/ViewPorts.h"
 #include "ViewPorts/ViewPort3D.h"
 #include "ViewPorts/LayoutInput.h"
@@ -82,6 +83,7 @@ static SDL_mutex* gCola = NULL;
 static std::deque<std::string> gPedidos;
 static SDL_atomic_t gCerrado;     // stdin se cerro: el cliente se fue
 static SDL_atomic_t gTipoEvento;  // el evento que despierta al loop (que en reposo duerme esperando eventos)
+static unsigned gToolCallsDesdeContexto = 0;
 
 static void Despertar() {
     const int t = SDL_AtomicGet(&gTipoEvento);
@@ -522,6 +524,37 @@ static Resultado HerrCaptura(bool soloVista3D, int anchoMax) {
     return r;
 }
 
+static Resultado HerrCaptureFile(const JVal* args) {
+    Resultado r;
+    const std::string path = Texto(Campo(args, "path"));
+    if (path.empty()) { r.error = true; r.texto = "capture_file requires path"; return r; }
+
+    const std::string zona = Texto(Campo(args, "zona"));
+    const bool soloVista3D = (zona != "ventana");
+    const JVal* anchoArg = Campo(args, "ancho_max");
+    const int anchoMax = (anchoArg && anchoArg->tipo == 1) ? (int)anchoArg->num : 800;
+    r = HerrCaptura(soloVista3D, anchoMax);
+    if (r.error) return r;
+
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) { r.error = true; r.texto = "cannot open capture path: " + path; r.imagenPng.clear(); return r; }
+    const size_t n = fwrite(r.imagenPng.data(), 1, r.imagenPng.size(), f);
+    const int closeRc = fclose(f);
+    if (n != r.imagenPng.size() || closeRc != 0) {
+        r.error = true;
+        r.texto = "failed writing capture: " + path;
+        r.imagenPng.clear();
+        return r;
+    }
+
+    const size_t bytes = r.imagenPng.size();
+    const std::string dims = r.texto;
+    r.imagenPng.clear(); // modo archivo: no enviar base64 por el protocolo
+    r.texto = "capture_file path=" + path + "\n" + dims +
+              "\nbytes=" + std::to_string(bytes);
+    return r;
+}
+
 // comandos del harness, uno por linea: corta en el primero que falla. Devuelve lo que imprimieron
 static Resultado HerrComandos(const std::string& texto) {
     Resultado r;
@@ -631,6 +664,29 @@ static Resultado HerrObjectCreate(const JVal* args) {
     return r;
 }
 
+static Resultado HerrParentKeep(const JVal* args) {
+    Resultado r;
+    const std::string childName = Texto(Campo(args, "child"));
+    const std::string parentName = Texto(Campo(args, "parent"));
+    Object* child = childName.empty() ? NULL : Buscar(SceneCollection, childName);
+    Object* parent = parentName.empty() ? NULL : Buscar(SceneCollection, parentName);
+    if (!child) { r.error = true; r.texto = "child not found: " + childName; return r; }
+    if (!parent) { r.error = true; r.texto = "parent not found: " + parentName; return r; }
+
+    ReparentKeepTransform(child, parent);
+    if (child->Parent != parent) {
+        r.error = true;
+        r.texto = "parent_keep failed: " + childName + " -> " + parentName;
+        return r;
+    }
+
+    std::string tree;
+    Arbol(child, 0, tree);
+    r.texto = "parent_keep " + childName + " -> " + parentName + "\n" + tree;
+    g_redraw = true;
+    return r;
+}
+
 static Resultado HerrImportar(const std::string& ruta) {
     Resultado r;
     if (ruta.empty()) { r.error = true; r.texto = "falta la ruta"; return r; }
@@ -703,7 +759,7 @@ static const char* const kHerramientasNativas[] = {
     "workspace_status", "session_open", "session_plan", "session_switch", "session_close",
     "task_open", "task_switch", "task_suspend", "task_resume", "task_commit", "task_close",
     "session_test", "menu_execute", "shortcut", "input",
-    "escena", "captura", "object_create", "agregar_objeto", "seleccionar", "transformar",
+    "escena", "captura", "capture_file", "object_create", "parent_keep", "agregar_objeto", "seleccionar", "transformar",
     "borrar_seleccion", "deshacer", "abrir_proyecto", "guardar_proyecto",
     "importar_modelo", "command", "comando"
 };
@@ -870,7 +926,7 @@ static Resultado DesdeWorkspace(const W3dLlmWorkspaceResult& w) {
 
 static bool HerramientaMuta(const std::string& nombre) {
     return nombre == "menu_execute" || nombre == "shortcut" || nombre == "input" ||
-           nombre == "object_create" || nombre == "agregar_objeto" || nombre == "seleccionar" || nombre == "transformar" ||
+           nombre == "object_create" || nombre == "parent_keep" || nombre == "agregar_objeto" || nombre == "seleccionar" || nombre == "transformar" ||
            nombre == "borrar_seleccion" || nombre == "deshacer" ||
            nombre == "abrir_proyecto" || nombre == "guardar_proyecto" ||
            nombre == "importar_modelo" || nombre == "command" || nombre == "comando";
@@ -981,7 +1037,7 @@ static Resultado HerrGuia(const JVal* args) {
           << "- Every task must have an internal task_commit with summary+comment before close.\n"
           << "- task_close outcome is complete, partial or missing and updates its linked plan point.\n"
           << "- session_close derives confirmed/partial/missing from the plan; confirmed also requires the latest session_test to pass.\n"
-          << "- Every tool response includes current context plus all suspended-task reminders.\n";
+          << "- Context reminders are periodic, and immediate after errors or session/task operations.\n";
     }
 
     if (level >= 2) {
@@ -1351,7 +1407,9 @@ static const char* kHerramientas = R"JSON([
 {"name":"input","description":"Inject generic editor input through the real SDL input path. Types: key (valor like Ctrl+S), mouse_move, mouse_button, wheel. This is the unrestricted UI fallback when no semantic command exists.","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["key","mouse_move","mouse_button","wheel"]},"valor":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},"dx":{"type":"integer"},"dy":{"type":"integer"},"boton":{"type":"string","enum":["left","middle","right"]},"down":{"type":"boolean"}},"required":["tipo"]}},
 {"name":"escena","description":"El arbol de objetos de la escena de Whisk3D: nombre, tipo, posicion, rotacion (euler en grados), escala, y cual esta seleccionado y cual es el activo. Las coordenadas son las del panel Propiedades: Z para arriba.","inputSchema":{"type":"object","properties":{}}},
 {"name":"captura","description":"Una imagen PNG de lo que muestra el editor, para ver el resultado. Por defecto solo la vista 3D activa; con zona='ventana', el editor entero. Se achica hasta ancho_max pixeles (800 si no se dice).","inputSchema":{"type":"object","properties":{"zona":{"type":"string","enum":["vista3d","ventana"]},"ancho_max":{"type":"integer"}}}},
+{"name":"capture_file","description":"Guarda el framebuffer actual en un PNG exacto y devuelve solo path, dimensiones y bytes, sin base64. zona=3d captura solo el viewport 3D; zona=ventana captura la ventana completa.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"zona":{"type":"string","enum":["3d","ventana"]},"ancho_max":{"type":"integer","minimum":64}},"required":["path"]}},
 {"name":"object_create","description":"Crea una primitiva, la nombra y aplica posicion/rotacion/escala en una sola llamada. Devuelve el estado final del objeto; usa coordenadas del panel Propiedades (Z arriba).","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["cube","plane","circle","uvsphere","cone","cylinder","vertex","empty","camera","light"]},"nombre":{"type":"string"},"posicion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotacion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"escala":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["tipo","nombre"]}},
+{"name":"parent_keep","description":"Reparenta un objeto conservando exactamente su transformacion global. Util para construir rigs/jerarquias sin mover las piezas.","inputSchema":{"type":"object","properties":{"child":{"type":"string"},"parent":{"type":"string"}},"required":["child","parent"]}},
 {"name":"agregar_objeto","description":"Agrega un objeto en el cursor 3D, como el menu Add. Queda seleccionado y activo.","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["cube","plane","circle","uvsphere","cone","cylinder","vertex","empty","camera","light"]}},"required":["tipo"]}},
 {"name":"seleccionar","description":"Selecciona un objeto por su nombre y lo deja activo (las herramientas que no reciben nombre actuan sobre el activo). Con agregar=true suma a la seleccion; sin nombre, deselecciona todo.","inputSchema":{"type":"object","properties":{"nombre":{"type":"string"},"agregar":{"type":"boolean"}}}},
 {"name":"transformar","description":"Cambia la posicion, la rotacion (euler en grados) o la escala de un objeto (por nombre, o el activo), con las coordenadas del panel Propiedades (Z para arriba). Solo cambia lo que se pasa. Se deshace con Ctrl+Z.","inputSchema":{"type":"object","properties":{"nombre":{"type":"string"},"posicion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotacion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"escala":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}}}},
@@ -1408,11 +1466,13 @@ static Resultado Llamar(const std::string& nombre, const JVal* args) {
     if (nombre == "shortcut") return HerrShortcut(Texto(Campo(args, "id")));
     if (nombre == "input") return HerrInput(args);
     if (nombre == "escena") return HerrEscena();
+    if (nombre == "capture_file") return HerrCaptureFile(args);
     if (nombre == "captura") {
         const JVal* am = Campo(args, "ancho_max");
         return HerrCaptura(Texto(Campo(args, "zona")) != "ventana", (am && am->tipo == 1) ? (int)am->num : 800);
     }
     if (nombre == "object_create") return HerrObjectCreate(args);
+    if (nombre == "parent_keep") return HerrParentKeep(args);
     if (nombre == "agregar_objeto") return HerrAgregar(Texto(Campo(args, "tipo")));
     if (nombre == "seleccionar") {
         const JVal* ag = Campo(args, "agregar");
@@ -1433,6 +1493,22 @@ static Resultado Llamar(const std::string& nombre, const JVal* args) {
     r.error = true;
     r.texto = "herramienta desconocida: '" + nombre + "'";
     return r;
+}
+
+static bool DebeRecordarContexto(const std::string& toolName, bool error) {
+    if (error) { gToolCallsDesdeContexto = 0; return true; }
+    if (toolName == "workspace_status" || toolName == "guide" || toolName == "guia" ||
+        toolName.compare(0, 8, "session_") == 0 ||
+        toolName.compare(0, 5, "task_") == 0) {
+        gToolCallsDesdeContexto = 0;
+        return true;
+    }
+    gToolCallsDesdeContexto++;
+    if (gToolCallsDesdeContexto >= 8) {
+        gToolCallsDesdeContexto = 0;
+        return true;
+    }
+    return false;
 }
 
 // ============================================================================
@@ -1465,7 +1541,7 @@ static void Atender(const std::string& linea) {
             "native UI paths. Successful mutations are automatically indexed in the current task. "
             "Checkpoint with task_commit(summary, comment), close tasks with complete/partial/missing, "
             "run session_test, then let session_close derive confirmed/partial/missing from the plan. "
-            "Every tool response carries current session/task context and all suspended-task reminders.";
+            "Context reminders include current session/task and suspended work periodically, and always after errors or session/task operations.";
         if (W3dLlmWorkspaceReady())
             instructions += "\n" + W3dLlmWorkspaceContext(false);
         res = "{\"protocolVersion\":" + Esc(ver) + ",\"capabilities\":{\"tools\":{\"listChanged\":false}},"
@@ -1500,7 +1576,7 @@ static void Atender(const std::string& linea) {
         if (!r.imagenPng.empty())
             res += "{\"type\":\"image\",\"data\":\"" + Base64(r.imagenPng) + "\",\"mimeType\":\"image/png\"},";
         res += "{\"type\":\"text\",\"text\":" + Esc(r.texto) + "}";
-        if (W3dLlmWorkspaceReady()) {
+        if (W3dLlmWorkspaceReady() && DebeRecordarContexto(toolName, r.error)) {
             res += ",{\"type\":\"text\",\"text\":" +
                    Esc(W3dLlmWorkspaceContext(false)) + "}";
         }
