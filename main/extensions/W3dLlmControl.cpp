@@ -459,7 +459,8 @@ struct Resultado {
     std::string texto;
     std::string imagenPng;   // (la captura)
     bool error;
-    Resultado() : error(false) {}
+    bool partialSuccess;     // hubo acciones OK antes de un fallo dentro del mismo tool-call
+    Resultado() : error(false), partialSuccess(false) {}
 };
 
 static Object* Buscar(Object* o, const std::string& nombre) {
@@ -575,7 +576,12 @@ static Resultado HerrComandos(const std::string& texto) {
         const bool ok = W3dRunCommand(linea, err);
         const std::string impreso = LeerCaptura();
         r.texto += (ok ? "OK    " : "FALLO ") + linea + "\n" + impreso;
-        if (!ok) { r.texto += "  -> " + err + "\n"; r.error = true; break; }
+        if (!ok) {
+            r.texto += "  -> " + err + "\n";
+            r.error = true;
+            r.partialSuccess = (n > 0);
+            break;
+        }
         n++;
     }
     if (r.texto.empty()) r.texto = "(sin comandos)";
@@ -1565,8 +1571,13 @@ static void Atender(const std::string& linea) {
                 r.texto = "mutation blocked by task protocol: " + reason;
             } else {
                 r = Llamar(toolName, toolArgs);
-                if (!r.error)
+                if (!r.error) {
                     W3dLlmWorkspaceRecordChange(toolName, DetalleCambio(toolName, toolArgs, r));
+                } else if (r.partialSuccess) {
+                    W3dLlmWorkspaceRecordChange(
+                        toolName + "_partial",
+                        "partial success before error | " + DetalleCambio(toolName, toolArgs, r));
+                }
             }
         } else {
             r = Llamar(toolName, toolArgs);
