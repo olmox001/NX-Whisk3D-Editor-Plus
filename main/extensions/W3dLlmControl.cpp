@@ -26,12 +26,14 @@
 #include "objects/Objects.h"
 #include "objects/ObjectMode.h"
 #include "objects/Mesh.h"
+#include "objects/Materials.h"
 #include "objects/Culling.h"
 #include "physics/W3dRigido.h"
 #include "objects/Camera.h"
 #include "ViewPorts/ViewPorts.h"
 #include "ViewPorts/ViewPort3D.h"
 #include "ViewPorts/LayoutInput.h"
+#include "ViewPorts/LayoutArbol.h"
 #include "WhiskUI/widgets/PopupMenu.h"   // MenuPantallaW
 #include "undo/Undo.h"
 #include "w3dGraphics.h"
@@ -845,6 +847,60 @@ static Resultado HerrSubjectMultiView(const JVal* args) {
     return r;
 }
 
+static Resultado HerrViewportGrid(const JVal* args) {
+    Resultado r;
+    Object* target=ResolverObjeto(args,"root","raiz","root_id","root_ref");
+    if(!target) target=ObjActivo;
+    if(!target){r.error=true;r.texto="viewport_grid: falta root/root_ref e non c'e oggetto attivo";return r;}
+
+    Vector3 mn,mx;
+    if(!W3dBoundsSubarbol(target,mn,mx)){
+        const Vector3 p=target->GetGlobalPosition();
+        mn=p-Vector3(1.0f,1.0f,1.0f); mx=p+Vector3(1.0f,1.0f,1.0f);
+    }
+    const Vector3 centro=(mn+mx)*0.5f;
+    float radio=(mx-mn).Length()*0.5f;
+    if(radio<0.05f) radio=0.05f;
+
+    int w=1280,h=720;
+    if(rootViewport){
+        if(rootViewport->width>0) w=rootViewport->width;
+        if(rootViewport->height>0) h=rootViewport->height;
+        ViewportBorrarArbol(rootViewport);
+        rootViewport=NULL;
+    }
+
+    Viewport3D* front=new Viewport3D();
+    Viewport3D* right=new Viewport3D();
+    Viewport3D* back=new Viewport3D();
+    Viewport3D* top=new Viewport3D();
+
+    rootViewport=new ViewportColumn(
+        new ViewportRow(front,right,0.5f),
+        new ViewportRow(back,top,0.5f),
+        0.5f);
+    rootViewport->Resize(w,h);
+
+    Viewport3D* v[4]={front,right,back,top};
+    Viewpoint::Enum e[4]={Viewpoint::front,Viewpoint::right,Viewpoint::back,Viewpoint::top};
+    for(int i=0;i<4;i++){
+        v[i]->pivot=centro;
+        v[i]->orthographic=true;
+        v[i]->SetViewpoint(e[i]);
+        v[i]->EncuadrarRadio(centro,radio);
+    }
+    viewPortActive=front;
+    Viewport3DActive=front;
+    g_redraw=true;
+
+    char b[512];
+    snprintf(b,sizeof(b),
+             "viewport_grid 2x2 root=%s center=%.4g,%.4g,%.4g radius=%.4g size=%dx%d views=front,right,back,top",
+             target->name.c_str(),centro.x,centro.z,centro.y,radio,w,h);
+    r.texto=b;
+    return r;
+}
+
 // comandos del harness, uno por linea: corta en el primero que falla. Devuelve lo que imprimieron
 static Resultado HerrComandos(const std::string& texto) {
     Resultado r;
@@ -1023,6 +1079,305 @@ static bool TransformarDirecto(Object* o, const JVal* op, std::string& err) {
     UndoTransformConfirmar();
     return true;
 }
+
+static bool TransformarMundoDirecto(Object* o, const JVal* op, std::string& err) {
+    if (!o) { err = "objeto no encontrado"; return false; }
+    float p[3], rot[3], e[3];
+    const JVal* pv = Campo2(op, "posicion", "position");
+    const JVal* rv = Campo2(op, "rotacion", "rotation");
+    const JVal* sv = Campo2(op, "escala", "scale");
+    const bool hp = Tres(pv, p), hr = Tres(rv, rot), hs = Tres(sv, e);
+    if (!hp && !hr && !hs) { err = "transform_world sin position/rotation/scale"; return false; }
+
+    Object* parent = o->Parent;
+    const bool hasParent = parent && parent != SceneCollection;
+    Quaternion prg;
+    Vector3 psg(1.0f,1.0f,1.0f), ppg(0.0f,0.0f,0.0f);
+    if (hasParent) {
+        prg = RotGlobalDe(parent);
+        psg = ScaleGlobalDe(parent);
+        ppg = parent->GetGlobalPositionBase();
+    }
+    const Quaternion ipr = hasParent ? prg.Inverted() : Quaternion();
+
+    UndoTransformIniciarObj(o);
+    if (hp) {
+        const Vector3 wg(p[0],p[2],p[1]);
+        const Vector3 d = hasParent ? (ipr * (wg - ppg)) : wg;
+        o->pos = Vector3(psg.x != 0.0f ? d.x / psg.x : d.x,
+                         psg.y != 0.0f ? d.y / psg.y : d.y,
+                         psg.z != 0.0f ? d.z / psg.z : d.z);
+    }
+    if (hr) {
+        const Quaternion qg = Quaternion::FromEulerXYZ(rot[0],rot[1],rot[2]);
+        o->SetRot(hasParent ? (ipr * qg) : qg);
+    }
+    if (hs) {
+        const Vector3 sg(e[0],e[1],e[2]);
+        o->scale = Vector3(psg.x != 0.0f ? sg.x / psg.x : sg.x,
+                           psg.y != 0.0f ? sg.y / psg.y : sg.y,
+                           psg.z != 0.0f ? sg.z / psg.z : sg.z);
+    }
+    UndoTransformConfirmar();
+    return true;
+}
+
+static bool CincoNumeros(const JVal* v, float out[5]) {
+    if (!v || v->tipo != 5) return false;
+    if (!v->nums.empty()) {
+        if (v->nums.size() < 5) return false;
+        for (int i=0;i<5;i++) out[i]=v->nums[(size_t)i];
+        return true;
+    }
+    if (v->lista.size() < 5) return false;
+    for (int i=0;i<5;i++) {
+        const JVal* n=v->lista[(size_t)i];
+        if (!n || n->tipo != 1) return false;
+        out[i]=(float)n->num;
+    }
+    return true;
+}
+
+static void ReemplazarMallaEditable(Mesh* m,
+                                    const std::vector<Vector3>& verts,
+                                    const std::vector<MeshFace>& faces) {
+    if (!m) return;
+    m->LiberarCapas(true);
+    delete[] m->vertex; m->vertex=NULL;
+    delete[] m->normals; m->normals=NULL;
+    delete[] m->uv; m->uv=NULL;
+    delete[] m->vertexColor; m->vertexColor=NULL;
+    m->faces3d.clear();
+    m->looseEdges.clear();
+    m->looseVerts.clear();
+
+    const int n=(int)verts.size();
+    m->vertexSize=n;
+    if (n>0) {
+        m->vertex=new GLfloat[(size_t)n*3];
+        m->normals=new GLbyte[(size_t)n*3];
+        m->uv=new GLfloat[(size_t)n*2];
+        m->vertexColor=new GLubyte[(size_t)n*4];
+        for (int i=0;i<n;i++) {
+            m->vertex[(size_t)i*3+0]=verts[(size_t)i].x;
+            m->vertex[(size_t)i*3+1]=verts[(size_t)i].y;
+            m->vertex[(size_t)i*3+2]=verts[(size_t)i].z;
+            m->normals[(size_t)i*3+0]=0; m->normals[(size_t)i*3+1]=127; m->normals[(size_t)i*3+2]=0;
+            m->uv[(size_t)i*2+0]=0.0f; m->uv[(size_t)i*2+1]=0.0f;
+            m->vertexColor[(size_t)i*4+0]=255; m->vertexColor[(size_t)i*4+1]=255;
+            m->vertexColor[(size_t)i*4+2]=255; m->vertexColor[(size_t)i*4+3]=255;
+        }
+    }
+    m->faces3d=faces;
+    if (m->materialsGroup.empty()) {
+        MaterialGroup mg; mg.name="Material"; m->materialsGroup.push_back(mg);
+    }
+    m->meshSmooth=true;
+    m->RecalcularNormales();
+    m->SincronizarCornerNormal();
+    m->ReagruparMeshParts();
+    m->CalcularBordes();
+    m->PoblarCapas();
+    m->GenerarRender(false);
+}
+
+static Vector3 LoftVertice(const std::string& axis,
+                           float cx,float cy,float cz,float ra,float rb,float ang) {
+    const float ca=cosf(ang), sa=sinf(ang);
+    if (axis=="x") return Vector3(cx, cz + rb*sa, cy + ra*ca);
+    if (axis=="y") return Vector3(cx + ra*ca, cz + rb*sa, cy);
+    return Vector3(cx + ra*ca, cz, cy + rb*sa);
+}
+
+static Resultado HerrLoftCreate(const JVal* args) {
+    Resultado r;
+    const std::string nombre=Texto2(args,"name","nombre");
+    std::string axis=Texto(Campo(args,"axis")); if(axis.empty()) axis="z";
+    const JVal* sec=Campo(args,"sections");
+    int sides=IntArg(Campo(args,"sides"),24);
+    const bool caps=BoolArg(Campo(args,"caps"),true);
+    if (nombre.empty() || !sec || sec->tipo!=5 || sec->lista.size()<2) {
+        r.error=true; r.texto="loft_create: requiere name y sections [[x,y,z,rA,rB], ...]"; return r;
+    }
+    if (axis!="x" && axis!="y" && axis!="z") { r.error=true; r.texto="loft_create: axis debe ser x/y/z"; return r; }
+    if (sides<6) sides=6; if (sides>96) sides=96;
+
+    std::vector<float> data;
+    data.reserve(sec->lista.size()*5);
+    for(size_t i=0;i<sec->lista.size();i++){
+        float q[5];
+        if(!CincoNumeros(sec->lista[i],q)){r.error=true;r.texto="loft_create: section invalida en indice "+std::to_string(i);return r;}
+        for(int k=0;k<5;k++) data.push_back(q[k]);
+    }
+
+    Mesh* m=(Mesh*)NewMesh(MeshType(MeshType::cube),NULL,false);
+    if(!m){r.error=true;r.texto="loft_create: no se pudo crear Mesh";return r;}
+    W3dRenombrarObjeto(m,nombre,false);
+
+    std::vector<Vector3> verts;
+    std::vector<MeshFace> faces;
+    const size_t rings=sec->lista.size();
+    verts.reserve(rings*(size_t)sides + (caps?2:0));
+    for(size_t j=0;j<rings;j++){
+        const float* q=&data[j*5];
+        for(int i=0;i<sides;i++){
+            float a=6.28318530718f*(float)i/(float)sides;
+            verts.push_back(LoftVertice(axis,q[0],q[1],q[2],q[3],q[4],a));
+        }
+    }
+    for(size_t j=0;j+1<rings;j++){
+        for(int i=0;i<sides;i++){
+            const int ni=(i+1)%sides;
+            MeshFace f; f.mat=0; f.smooth=1;
+            f.idx.push_back((int)j*sides+i);
+            f.idx.push_back((int)j*sides+ni);
+            f.idx.push_back((int)(j+1)*sides+ni);
+            f.idx.push_back((int)(j+1)*sides+i);
+            faces.push_back(f);
+        }
+    }
+    if(caps){
+        const int a=(int)verts.size();
+        const float* q0=&data[0];
+        verts.push_back(Vector3(q0[0],q0[2],q0[1]));
+        const int b=(int)verts.size();
+        const float* q1=&data[(rings-1)*5];
+        verts.push_back(Vector3(q1[0],q1[2],q1[1]));
+        for(int i=0;i<sides;i++){
+            int ni=(i+1)%sides;
+            MeshFace f0; f0.mat=0; f0.smooth=1; f0.idx.push_back(a); f0.idx.push_back(ni); f0.idx.push_back(i); faces.push_back(f0);
+            MeshFace f1; f1.mat=0; f1.smooth=1;
+            f1.idx.push_back(b); f1.idx.push_back((int)(rings-1)*sides+i); f1.idx.push_back((int)(rings-1)*sides+ni); faces.push_back(f1);
+        }
+    }
+    ReemplazarMallaEditable(m,verts,faces);
+
+    const std::string parentName=Texto2(args,"parent","padre");
+    if(!parentName.empty()){
+        Object* p=Buscar(SceneCollection,parentName);
+        if(!p){r.error=true;r.partialSuccess=true;r.texto="loft_create: parent no encontrado: "+parentName;return r;}
+        ReparentKeepTransform(m,p);
+    }
+    ObjActivo=m;
+    char b[256];
+    snprintf(b,sizeof(b),"loft_create %s rings=%lu sides=%d verts=%d faces=%lu axis=%s",
+             m->name.c_str(),(unsigned long)rings,sides,m->vertexSize,(unsigned long)m->faces3d.size(),axis.c_str());
+    r.texto=b; g_redraw=true; return r;
+}
+static Vector3 NormalFaceMalla(Mesh* m, const MeshFace& f) {
+    Vector3 n(0,0,0);
+    if (m && m->normals) {
+        for (size_t i=0;i<f.idx.size();i++) {
+            int vi=f.idx[i];
+            if (vi<0 || vi>=m->vertexSize) continue;
+            n.x += (float)m->normals[(size_t)vi*3+0] / 127.0f;
+            n.y += (float)m->normals[(size_t)vi*3+1] / 127.0f;
+            n.z += (float)m->normals[(size_t)vi*3+2] / 127.0f;
+        }
+    }
+    if (n.Length() < 1.0e-5f && f.idx.size()>=3 && m && m->vertex) {
+        const int a=f.idx[0], b=f.idx[1], c=f.idx[2];
+        Vector3 A(m->vertex[a*3],m->vertex[a*3+1],m->vertex[a*3+2]);
+        Vector3 B(m->vertex[b*3],m->vertex[b*3+1],m->vertex[b*3+2]);
+        Vector3 C(m->vertex[c*3],m->vertex[c*3+1],m->vertex[c*3+2]);
+        n=Vector3::Cross(B-A,C-A);
+    }
+    if (n.Length() < 1.0e-5f) return Vector3(0,1,0);
+    return n.Normalized();
+}
+
+static Vector3 CentroFaceMalla(Mesh* m, const MeshFace& f) {
+    Vector3 p(0,0,0); int n=0;
+    if (!m || !m->vertex) return p;
+    for(size_t i=0;i<f.idx.size();i++){
+        int vi=f.idx[i]; if(vi<0||vi>=m->vertexSize) continue;
+        p += Vector3(m->vertex[vi*3],m->vertex[vi*3+1],m->vertex[vi*3+2]); n++;
+    }
+    if(n>0) p = p * (1.0f/(float)n);
+    return p;
+}
+
+static void AgregarPelo(std::vector<Vector3>& verts, std::vector<MeshFace>& faces,
+                        const Vector3& p, Vector3 n, float largo, float ancho, float droop,
+                        unsigned seed) {
+    n.y -= droop;
+    if (n.Length() < 1.0e-5f) n=Vector3(0,1,0);
+    n=n.Normalized();
+    Vector3 ref=fabsf(n.y)<0.85f ? Vector3(0,1,0) : Vector3(1,0,0);
+    Vector3 a=Vector3::Cross(n,ref); if(a.Length()<1.0e-5f) a=Vector3(1,0,0); else a=a.Normalized();
+    Vector3 b=Vector3::Cross(n,a); if(b.Length()<1.0e-5f) b=Vector3(0,0,1); else b=b.Normalized();
+    const float phase=6.28318530718f*(float)(seed%97u)/97.0f;
+    const float cp=cosf(phase), sp=sinf(phase);
+    Vector3 ar=a*cp+b*sp, br=Vector3::Cross(n,ar); br=br.Normalized();
+    const float var=0.82f + 0.36f*(float)((seed*37u)%101u)/100.0f;
+    const float w=ancho*(0.85f+0.25f*(float)((seed*17u)%31u)/30.0f);
+    const int base=(int)verts.size();
+    verts.push_back(p + ar*w);
+    verts.push_back(p + (ar*(-0.5f)+br*0.8660254f)*w);
+    verts.push_back(p + (ar*(-0.5f)-br*0.8660254f)*w);
+    verts.push_back(p + n*(largo*var));
+    for(int k=0;k<3;k++){
+        MeshFace f; f.mat=0; f.smooth=1;
+        f.idx.push_back(base+k); f.idx.push_back(base+((k+1)%3)); f.idx.push_back(base+3);
+        faces.push_back(f);
+    }
+}
+
+static Resultado HerrFurGenerate(const JVal* args) {
+    Resultado r;
+    Object* o=ResolverObjeto(args,"source","origen","id","ref");
+    if(!o){ const std::string n=Texto2(args,"source","origen"); if(!n.empty()) o=Buscar(SceneCollection,n); }
+    if(!o || o->getType()!=ObjectType::mesh){r.error=true;r.texto="fur_generate: source deve essere una mesh";return r;}
+    Mesh* src=(Mesh*)o;
+    const std::string name=Texto2(args,"name","nombre");
+    if(name.empty()){r.error=true;r.texto="fur_generate: manca name";return r;}
+    const JVal* lv=Campo(args,"length"), *wv=Campo(args,"width"), *dv=Campo(args,"droop");
+    float length=(lv&&lv->tipo==1)?(float)lv->num:0.12f;
+    float width=(wv&&wv->tipo==1)?(float)wv->num:0.012f;
+    float droop=(dv&&dv->tipo==1)?(float)dv->num:0.10f;
+    int samples=IntArg(Campo(args,"samples_per_face"),3);
+    if(samples<1)samples=1; if(samples>8)samples=8;
+    if(length<=0||width<=0){r.error=true;r.texto="fur_generate: length/width devono essere >0";return r;}
+
+    std::vector<Vector3> verts;
+    std::vector<MeshFace> faces;
+    verts.reserve(src->faces3d.size()*(size_t)samples*4);
+    faces.reserve(src->faces3d.size()*(size_t)samples*3);
+    unsigned seed=1;
+    for(size_t fi=0;fi<src->faces3d.size();fi++){
+        const MeshFace& f=src->faces3d[fi];
+        if(f.idx.size()<3) continue;
+        Vector3 c=CentroFaceMalla(src,f);
+        Vector3 n=NormalFaceMalla(src,f);
+        for(int sidx=0;sidx<samples;sidx++){
+            Vector3 p=c;
+            if(sidx>0){
+                int vi=f.idx[(size_t)(sidx-1)%f.idx.size()];
+                if(vi>=0 && vi<src->vertexSize){
+                    Vector3 q(src->vertex[vi*3],src->vertex[vi*3+1],src->vertex[vi*3+2]);
+                    p=c*0.58f+q*0.42f;
+                }
+            }
+            AgregarPelo(verts,faces,p,n,length,width,droop,seed++);
+        }
+    }
+    Object* parent=src->Parent ? src->Parent : SceneCollection;
+    Mesh* fur=(Mesh*)NewMesh(MeshType(MeshType::cube),parent,false);
+    if(!fur){r.error=true;r.texto="fur_generate: no se pudo crear malla";return r;}
+    W3dRenombrarObjeto(fur,name,false);
+    ReemplazarMallaEditable(fur,verts,faces);
+    fur->pos=src->pos; fur->SetRot(src->Rot()); fur->scale=src->scale;
+    if(!src->materialsGroup.empty() && !fur->materialsGroup.empty())
+        fur->materialsGroup[0].material=src->materialsGroup[0].material;
+    fur->GenerarRender(false);
+    ObjActivo=fur; g_redraw=true;
+    char b[256];
+    snprintf(b,sizeof(b),"fur_generate %s source=%s strands=%lu verts=%d faces=%lu",
+             fur->name.c_str(),src->name.c_str(),
+             (unsigned long)(verts.size()/4),fur->vertexSize,(unsigned long)fur->faces3d.size());
+    r.texto=b; return r;
+}
+
 static Resultado HerrObjectState(const JVal* args) {
     Resultado r;
     std::vector<std::string> nombres;
@@ -1130,6 +1485,7 @@ static Resultado HerrSceneBatch(const JVal* args) {
     const JVal* ops = Campo(args, "ops");
     if (!ops || ops->tipo != 5) { r.error = true; r.texto = "scene_batch: ops debe ser un array"; return r; }
     int creados = 0, movidos = 0, padres = 0, seleccionados = 0;
+    int materiales = 0, asignaciones = 0, fisicos = 0, visibilidades = 0;
     for (size_t i = 0; i < ops->lista.size(); i++) {
         const JVal* op = ops->lista[i];
         if (!op || op->tipo != 4) { r.error = true; r.partialSuccess = i > 0; r.texto = "scene_batch item invalido"; break; }
@@ -1149,6 +1505,10 @@ static Resultado HerrSceneBatch(const JVal* args) {
             Object* o = ResolverObjeto(op,"nombre","name","id","ref");
             if (!TransformarDirecto(o, op, err)) {}
             else movidos++;
+        } else if (accion == "transform_world") {
+            Object* o = ResolverObjeto(op,"nombre","name","id","ref");
+            if (!TransformarMundoDirecto(o, op, err)) {}
+            else movidos++;
         } else if (accion == "parent_keep") {
             Object* c = ResolverObjeto(op,"child","hijo","child_id","child_ref");
             Object* p = ResolverObjeto(op,"parent","padre","parent_id","parent_ref");
@@ -1158,6 +1518,74 @@ static Resultado HerrSceneBatch(const JVal* args) {
             Object* o = ResolverObjeto(op,"nombre","name","id","ref");
             if (!o) err = "select: objeto no encontrado";
             else { DeseleccionarTodo(); o->Seleccionar(); ObjActivo = o; seleccionados++; }
+        } else if (accion == "material_create") {
+            Object* o = ResolverObjeto(op,"nombre","object","id","ref");
+            const std::string mat = Texto2(op,"material","mat");
+            float c[3];
+            if (!o || o->getType()!=ObjectType::mesh || mat.empty() || !Tres(Campo2(op,"color","rgb"), c)) {
+                err = "material_create: requiere mesh object/name, material y color [r,g,b]";
+            } else {
+                Material* mt = BuscarMaterialPorNombre(mat);
+                if (!mt) mt = new Material(mat);
+                if (!mt) err = "material_create: no se pudo crear material";
+                else {
+                    mt->diffuse[0]=c[0]; mt->diffuse[1]=c[1]; mt->diffuse[2]=c[2]; mt->diffuse[3]=1.0f;
+                    mt->ambient[0]=c[0]*0.35f; mt->ambient[1]=c[1]*0.35f; mt->ambient[2]=c[2]*0.35f;
+                    Mesh* m=(Mesh*)o;
+                    if (m->materialsGroup.empty()) { MaterialGroup mg; mg.name="Material"; m->materialsGroup.push_back(mg); }
+                    m->materialsGroup[0].material=mt;
+                    m->GenerarRender(false);
+                    materiales++;
+                }
+            }
+        } else if (accion == "material_assign") {
+            Object* o = ResolverObjeto(op,"nombre","object","id","ref");
+            const std::string mat = Texto2(op,"material","mat");
+            const int slot = IntArg(Campo(op,"slot"),0);
+            Material* mt = mat.empty() ? NULL : BuscarMaterialPorNombre(mat);
+            if (!o || o->getType()!=ObjectType::mesh || !mt) err = "material_assign: mesh/material no encontrado";
+            else {
+                Mesh* m=(Mesh*)o;
+                if (slot < 0 || slot >= (int)m->materialsGroup.size()) err = "material_assign: slot fuera de rango";
+                else {
+                    m->materialsGroup[(size_t)slot].material=mt;
+                    m->GenerarRender(false);
+                    asignaciones++;
+                }
+            }
+        } else if (accion == "visibility") {
+            Object* o = ResolverObjeto(op,"nombre","object","id","ref");
+            const JVal* vv = Campo2(op,"visible","value");
+            if (!o || !vv || (vv->tipo != 1 && vv->tipo != 3)) err = "visibility: requiere objeto y visible";
+            else { o->visible = (vv->tipo == 3) ? vv->b : (vv->num != 0.0); visibilidades++; }
+        } else if (accion == "physics") {
+            Object* o = ResolverObjeto(op,"nombre","object","id","ref");
+            if (!o) err = "physics: objeto no encontrado";
+            else {
+                if (!o->fisica) o->fisica = new W3dRigidoDef();
+                const std::string tipo = Texto2(op,"tipo","type");
+                if (!tipo.empty()) {
+                    if (tipo=="static" || tipo=="estatico") o->fisica->tipo=0;
+                    else if (tipo=="dynamic" || tipo=="dinamico") o->fisica->tipo=1;
+                    else if (tipo=="character" || tipo=="personaje") o->fisica->tipo=2;
+                    else if (tipo=="mesh" || tipo=="malla") o->fisica->tipo=3;
+                    else err="physics: tipo desconocido";
+                }
+                const JVal* mv=Campo2(op,"masa","mass");
+                if (mv && mv->tipo==1) o->fisica->masa=(float)mv->num;
+                float box[3], center[3];
+                if (Tres(Campo2(op,"collision","box"),box)) {
+                    o->fisica->caja[0]=box[0]; o->fisica->caja[1]=box[2]; o->fisica->caja[2]=box[1];
+                }
+                if (Tres(Campo2(op,"centro","center"),center)) {
+                    o->fisica->centro[0]=center[0]; o->fisica->centro[1]=center[2]; o->fisica->centro[2]=center[1];
+                }
+                const JVal* fr=Campo2(op,"friccion","friction");
+                const JVal* re=Campo2(op,"rebote","restitution");
+                if (fr && fr->tipo==1) o->fisica->friccion=(float)fr->num;
+                if (re && re->tipo==1) o->fisica->rebote=(float)re->num;
+                if (err.empty()) fisicos++;
+            }
         } else err = "op desconocida: " + accion;
 
         if (!err.empty()) {
@@ -1171,8 +1599,10 @@ static Resultado HerrSceneBatch(const JVal* args) {
     g_redraw = true;
     if (!r.error) {
         char b[192];
-        snprintf(b, sizeof(b), "scene_batch ok=%lu create=%d transform=%d parent=%d select=%d",
-                 (unsigned long)ops->lista.size(), creados, movidos, padres, seleccionados);
+        snprintf(b, sizeof(b),
+                  "scene_batch ok=%lu create=%d transform=%d parent=%d select=%d mat_new=%d mat_assign=%d physics=%d visibility=%d",
+                 (unsigned long)ops->lista.size(), creados, movidos, padres, seleccionados,
+                 materiales, asignaciones, fisicos, visibilidades);
         r.texto = b;
     }
     return r;
@@ -1231,7 +1661,7 @@ static const char* const kHerramientasNativas[] = {
     "workspace_status", "session_open", "session_plan", "session_switch", "session_close",
     "task_open", "task_switch", "task_suspend", "task_resume", "task_commit", "task_close",
     "session_test", "menu_execute", "shortcut", "input",
-    "escena", "scene_index", "object_state", "scene_batch", "captura", "capture_file", "subject_capture", "subject_multiview", "object_create", "parent_keep", "agregar_objeto", "seleccionar", "transformar",
+    "escena", "scene_index", "object_state", "scene_batch", "captura", "capture_file", "subject_capture", "subject_multiview", "viewport_grid", "loft_create", "fur_generate", "object_create", "parent_keep", "agregar_objeto", "seleccionar", "transformar",
     "borrar_seleccion", "deshacer", "abrir_proyecto", "guardar_proyecto",
     "importar_modelo", "command", "comando"
 };
@@ -1880,11 +2310,14 @@ static const char* kHerramientas = R"JSON([
 {"name":"escena","description":"El arbol de objetos de la escena de Whisk3D: nombre, tipo, posicion, rotacion (euler en grados), escala, y cual esta seleccionado y cual es el activo. Las coordenadas son las del panel Propiedades: Z para arriba.","inputSchema":{"type":"object","properties":{}}},
 {"name":"scene_index","description":"Indice strutturato della scena con riferimenti runtime stabili @serial, path gerarchico, parent/children, transform, world bounds e dimensioni del sottoalbero, mesh stats e corpo fisico/collision box. root/root_ref limita a un gruppo; filter e depth riducono output.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"root_ref":{"type":["string","number"]},"filter":{"type":"string"},"depth":{"type":"integer"},"max":{"type":"integer"}}}},
 {"name":"object_state","description":"Estado numerico compatto di uno o molti oggetti. Accetta name/names oppure id/ref @serial restituiti da scene_index.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"names":{"type":"array","items":{"type":"string"}},"id":{"type":"number"},"ref":{"type":["string","number"]}}}}},
-{"name":"scene_batch","description":"Esegue in una singola chiamata molte operazioni create/transform/parent_keep/select e restituisce solo contatori. Accetta nomi inglesi o spagnoli dei campi; ideale per rig e modelli grandi.","inputSchema":{"type":"object","properties":{"ops":{"type":"array","items":{"type":"object"}}},"required":["ops"]}},
+{"name":"scene_batch","description":"Esegue in una singola chiamata operazioni create/transform/transform_world/parent_keep/select/visibility/material_create/material_assign/physics e restituisce solo contatori. Accetta nomi inglesi o spagnoli e riferimenti @serial; ideale per rig, materiali e corpi fisici grandi.","inputSchema":{"type":"object","properties":{"ops":{"type":"array","items":{"type":"object"}}},"required":["ops"]}},
 {"name":"captura","description":"Una imagen PNG de lo que muestra el editor, para ver el resultado. Por defecto solo la vista 3D activa; con zona='ventana', el editor entero. Se achica hasta ancho_max pixeles (800 si no se dice).","inputSchema":{"type":"object","properties":{"zona":{"type":"string","enum":["vista3d","ventana"]},"ancho_max":{"type":"integer"}}}},
 {"name":"capture_file","description":"Guarda una captura PNG ligera y devuelve solo path/dimensiones/bytes. Por defecto recorta automaticamente la superficie util respecto del fondo y limita a 480 px; sin base64.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"zona":{"type":"string","enum":["3d","ventana"]},"ancho_max":{"type":"integer","minimum":64},"crop":{"type":"boolean"},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["path"]}},
 {"name":"subject_capture","description":"Inquadra direttamente un sottoalbero nel viewport 3D senza dipendere dal focus GUI, sceglie vista front/right/top/back/left/bottom, ritaglia automaticamente la superficie utile e salva un PNG leggero senza base64.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"path":{"type":"string"},"view":{"type":"string","enum":["front","right","top","back","left","bottom"]},"max_width":{"type":"integer","minimum":64},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["root","path"]}},
 {"name":"subject_multiview","description":"Genera in una chiamata viste auto-inquadrate e auto-croppate del solo sottoalbero. Default: front/right/back/left/top. Scrive base_path_<view>.png e non invia base64.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"base_path":{"type":"string"},"views":{"type":"array","items":{"type":"string","enum":["front","right","top","back","left","bottom"]}},"max_width":{"type":"integer","minimum":64},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["root","base_path"]}},
+{"name":"viewport_grid","description":"Sostituisce il layout attuale con 4 veri Viewport3D simultanei in griglia 2x2: front/right/back/top, ortografici e auto-inquadrati sul sottoalbero. Non genera screenshot: cambia davvero l'interfaccia editor.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"root_ref":{"type":["string","number"]}}}},
+{"name":"loft_create","description":"Crea una vera mesh editabile continua da sezioni ellittiche misurate. sections contiene righe [x,y,z,rA,rB]; axis=z usa raggi width/depth, axis=x usa depth/height, axis=y usa width/height. Utile per teste, toraci, arti e orecchie senza impilare primitive.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"parent":{"type":"string"},"axis":{"type":"string","enum":["x","y","z"]},"sides":{"type":"integer","minimum":6,"maximum":96},"caps":{"type":"boolean"},"sections":{"type":"array","items":{"type":"array","items":{"type":"number"},"minItems":5,"maxItems":5}}},"required":["name","sections"]}},
+{"name":"fur_generate","description":"Genera una singola mesh di pelo geometrico dalla superficie di una mesh, campionando le facce e orientando ogni ciuffo dalle normali. Parametri: samples_per_face 1..8, length, width, droop. Il pelo eredita transform e materiale della mesh sorgente.","inputSchema":{"type":"object","properties":{"source":{"type":"string"},"name":{"type":"string"},"samples_per_face":{"type":"integer","minimum":1,"maximum":8},"length":{"type":"number"},"width":{"type":"number"},"droop":{"type":"number"}},"required":["source","name"]}},
 {"name":"object_create","description":"Crea una primitiva, la nombra y aplica posicion/rotacion/escala en una sola llamada. Devuelve el estado final del objeto; usa coordenadas del panel Propiedades (Z arriba).","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["cube","plane","circle","uvsphere","cone","cylinder","vertex","empty","camera","light"]},"nombre":{"type":"string"},"posicion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotacion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"escala":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["tipo","nombre"]}},
 {"name":"parent_keep","description":"Reparenta un objeto conservando exactamente su transformacion global. Util para construir rigs/jerarquias sin mover las piezas.","inputSchema":{"type":"object","properties":{"child":{"type":"string"},"parent":{"type":"string"}},"required":["child","parent"]}},
 {"name":"agregar_objeto","description":"Agrega un objeto en el cursor 3D, como el menu Add. Queda seleccionado y activo.","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["cube","plane","circle","uvsphere","cone","cylinder","vertex","empty","camera","light"]}},"required":["tipo"]}},
@@ -1949,6 +2382,9 @@ static Resultado Llamar(const std::string& nombre, const JVal* args) {
     if (nombre == "capture_file") return HerrCaptureFile(args);
     if (nombre == "subject_capture") return HerrSubjectCapture(args);
     if (nombre == "subject_multiview") return HerrSubjectMultiView(args);
+    if (nombre == "viewport_grid") return HerrViewportGrid(args);
+    if (nombre == "loft_create") return HerrLoftCreate(args);
+    if (nombre == "fur_generate") return HerrFurGenerate(args);
     if (nombre == "captura") {
         const JVal* am = Campo(args, "ancho_max");
         return HerrCaptura(Texto(Campo(args, "zona")) != "ventana", (am && am->tipo == 1) ? (int)am->num : 800);
