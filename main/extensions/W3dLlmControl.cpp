@@ -25,6 +25,10 @@
 #include "io/lectura-escritura.h"  // ImportModeloPorExtension
 #include "objects/Objects.h"
 #include "objects/ObjectMode.h"
+#include "objects/Mesh.h"
+#include "objects/Culling.h"
+#include "physics/W3dRigido.h"
+#include "objects/Camera.h"
 #include "ViewPorts/ViewPorts.h"
 #include "ViewPorts/ViewPort3D.h"
 #include "ViewPorts/LayoutInput.h"
@@ -469,8 +473,53 @@ static Object* Buscar(Object* o, const std::string& nombre) {
     for (size_t i = 0; i < o->Childrens.size(); i++) if (Object* r = Buscar(o->Childrens[i], nombre)) return r;
     return NULL;
 }
+
+static Object* BuscarSerial(Object* o, unsigned int serial) {
+    if (!o || serial == 0) return NULL;
+    if (o != SceneCollection && o->serial == serial) return o;
+    for (size_t i = 0; i < o->Childrens.size(); i++) {
+        Object* r = BuscarSerial(o->Childrens[i], serial);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+static Object* ResolverObjeto(const JVal* args,
+                              const char* nameA = "name", const char* nameB = "nombre",
+                              const char* idA = "id", const char* idB = "ref") {
+    if (!args) return NULL;
+    std::string nombre = Texto(Campo(args, nameA));
+    if (nombre.empty()) nombre = Texto(Campo(args, nameB));
+    if (!nombre.empty()) return Buscar(SceneCollection, nombre);
+    const JVal* iv = Campo(args, idA);
+    if (!iv) iv = Campo(args, idB);
+    if (iv && iv->tipo == 1) return BuscarSerial(SceneCollection, (unsigned int)iv->num);
+    if (iv && iv->tipo == 2) {
+        std::string q = iv->str;
+        if (!q.empty() && q[0] == '@') q.erase(q.begin());
+        if (!q.empty()) return BuscarSerial(SceneCollection, (unsigned int)strtoul(q.c_str(), NULL, 10));
+    }
+    return NULL;
+}
 // LAS COORDENADAS DE LA PERSONA: las del panel Propiedades, con Z para arriba. Adentro el editor tiene Y para arriba:
 // el campo "Y" de la posicion es pos.z y el "Z" es pos.y. La rotacion (euler en grados) y la escala van como el panel
+static std::string ResumenObjeto(Object* o) {
+    if (!o) return "<null>";
+    const Vector3& p = o->pos;
+    const Vector3& r = o->rotEuler;
+    const Vector3& e = o->scale;
+    const Vector3 g = o->GetGlobalPosition();
+    char b[512];
+    snprintf(b, sizeof(b),
+             "%s type=%s parent=%s Lpos=%.4g,%.4g,%.4g Lrot=%.4g,%.4g,%.4g "
+             "S=%.4g,%.4g,%.4g Wpos=%.4g,%.4g,%.4g",
+             o->name.c_str(), W3dNombreTipo(o->getType()),
+             (o->Parent && o->Parent != SceneCollection) ? o->Parent->name.c_str() : "-",
+             p.x, p.z, p.y, r.x, r.y, r.z, e.x, e.y, e.z,
+             g.x, g.z, g.y);
+    return b;
+}
+
 static void Arbol(Object* o, int prof, std::string& out) {
     char b[512];
     const Vector3& p = o->pos; const Vector3& r = o->rotEuler; const Vector3& e = o->scale;
@@ -492,35 +541,82 @@ static Resultado HerrEscena() {
 
 // la pantalla tal como se ve (o solo la vista 3D activa) a PNG: el mismo dibujo que la captura del harness (uishot),
 // achicada (de a bloques enteros, hasta 'anchoMax') y comprimida
-static Resultado HerrCaptura(bool soloVista3D, int anchoMax) {
+static Resultado HerrCaptura(bool soloVista3D, int anchoMax,
+                              bool recortar = false, int margenPct = 7, int umbral = 28) {
     Resultado r;
     if (!rootViewport) { r.error = true; r.texto = "no hay layout de viewports"; return r; }
     { extern void CargarTexturasPendientes(); CargarTexturasPendientes(); }
     const int W = MenuPantallaW, H = W3dPantallaAlto;
     if (W < 1 || H < 1) { r.error = true; r.texto = "la ventana no tiene tamano"; return r; }
     rootViewport->Render();
-    LayoutRenderMenu(W, H);   // (los menus y popups van aparte, encima de todo)
+    LayoutRenderMenu(W, H);
     w3dEngine::Finish();
+
     int x0 = 0, y0 = 0, w = W, h = H;
     Viewport3D* vp = Viewport3DActive;
-    if (soloVista3D && vp && vp->width > 0 && vp->height > 0) { x0 = vp->x; w = vp->width; h = vp->height; y0 = H - vp->y - vp->height; }
+    if (soloVista3D && vp && vp->width > 0 && vp->height > 0) {
+        x0 = vp->x; w = vp->width; h = vp->height; y0 = H - vp->y - vp->height;
+    }
+
     std::vector<unsigned char> px((size_t)w * h * 4, 0);
-    w3dEngine::ReadPixelsRGBA(x0, y0, w, h, &px[0]);   // (de abajo hacia arriba)
+    w3dEngine::ReadPixelsRGBA(x0, y0, w, h, &px[0]); // origen abajo-izquierda
+
+    int cx = 0, cy = 0, cw = w, ch = h;
+    if (recortar && w >= 16 && h >= 16) {
+        unsigned bg[3] = {0,0,0};
+        const int sx[4] = {2, w - 3, 2, w - 3};
+        const int sy[4] = {2, 2, h - 3, h - 3};
+        for (int k = 0; k < 4; k++)
+            for (int c = 0; c < 3; c++)
+                bg[c] += px[((size_t)sy[k] * w + sx[k]) * 4 + c];
+        for (int c = 0; c < 3; c++) bg[c] /= 4u;
+
+        int mnx = w, mny = h, mxx = -1, mxy = -1;
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                const size_t q = ((size_t)y * w + x) * 4;
+                const int d0 = abs((int)px[q] - (int)bg[0]);
+                const int d1 = abs((int)px[q + 1] - (int)bg[1]);
+                const int d2 = abs((int)px[q + 2] - (int)bg[2]);
+                if (d0 + d1 + d2 < umbral * 3) continue;
+                if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+                if (y < mny) mny = y; if (y > mxy) mxy = y;
+            }
+        }
+        if (mxx >= mnx && mxy >= mny) {
+            int bw = mxx - mnx + 1, bh = mxy - mny + 1;
+            int margen = ((bw > bh ? bw : bh) * margenPct) / 100;
+            if (margen < 4) margen = 4;
+            cx = mnx - margen; if (cx < 0) cx = 0;
+            cy = mny - margen; if (cy < 0) cy = 0;
+            int ex = mxx + margen + 1; if (ex > w) ex = w;
+            int ey = mxy + margen + 1; if (ey > h) ey = h;
+            cw = ex - cx; ch = ey - cy;
+        }
+    }
+
     if (anchoMax < 64) anchoMax = 64;
-    const int f = (w + anchoMax - 1) / anchoMax;      // de a cuantos pixeles se promedia
-    const int ow = w / f, oh = h / f;
+    const int f = (cw + anchoMax - 1) / anchoMax;
+    const int ow = cw / f, oh = ch / f;
+    if (ow < 1 || oh < 1) { r.error = true; r.texto = "capture crop vacio"; return r; }
     std::vector<unsigned char> rgb((size_t)ow * oh * 3);
     for (int y = 0; y < oh; y++)
         for (int x = 0; x < ow; x++)
             for (int c = 0; c < 3; c++) {
                 unsigned suma = 0;
                 for (int j = 0; j < f; j++)
-                    for (int i = 0; i < f; i++) suma += px[((size_t)(h - 1 - (y * f + j)) * w + (x * f + i)) * 4 + c];
-                rgb[((size_t)y * ow + x) * 3 + c] = (unsigned char)(suma / (unsigned)(f * f));
+                    for (int i = 0; i < f; i++) {
+                        const int sxp = cx + x * f + i;
+                        const int syp = cy + ch - 1 - (y * f + j);
+                        suma += px[((size_t)syp * w + sxp) * 4 + c];
+                    }
+                rgb[((size_t)y * ow + x) * 3 + c] =
+                    (unsigned char)(suma / (unsigned)(f * f));
             }
     r.imagenPng = PngComprimido(rgb, ow, oh);
-    char b[128];
-    snprintf(b, sizeof(b), "%s: %dx%d (la ventana mide %dx%d)", soloVista3D ? "vista 3D" : "ventana", ow, oh, W, H);
+    char b[192];
+    snprintf(b, sizeof(b), "%s: %dx%d source=%dx%d crop=%d,%d,%d,%d",
+             soloVista3D ? "vista 3D" : "ventana", ow, oh, W, H, cx, cy, cw, ch);
     r.texto = b;
     return r;
 }
@@ -533,8 +629,14 @@ static Resultado HerrCaptureFile(const JVal* args) {
     const std::string zona = Texto(Campo(args, "zona"));
     const bool soloVista3D = (zona != "ventana");
     const JVal* anchoArg = Campo(args, "ancho_max");
-    const int anchoMax = (anchoArg && anchoArg->tipo == 1) ? (int)anchoArg->num : 800;
-    r = HerrCaptura(soloVista3D, anchoMax);
+    const int anchoMax = (anchoArg && anchoArg->tipo == 1) ? (int)anchoArg->num : 480;
+    const JVal* cropArg = Campo(args, "crop");
+    const bool crop = !cropArg || cropArg->tipo != 3 || cropArg->b;
+    const JVal* marginArg = Campo(args, "margin_pct");
+    const int marginPct = (marginArg && marginArg->tipo == 1) ? (int)marginArg->num : 7;
+    const JVal* thrArg = Campo(args, "threshold");
+    const int threshold = (thrArg && thrArg->tipo == 1) ? (int)thrArg->num : 28;
+    r = HerrCaptura(soloVista3D, anchoMax, crop, marginPct, threshold);
     if (r.error) return r;
 
     FILE* f = fopen(path.c_str(), "wb");
@@ -553,6 +655,193 @@ static Resultado HerrCaptureFile(const JVal* args) {
     r.imagenPng.clear(); // modo archivo: no enviar base64 por el protocolo
     r.texto = "capture_file path=" + path + "\n" + dims +
               "\nbytes=" + std::to_string(bytes);
+    return r;
+}
+
+static Viewport3D* PrimerViewport3D(ViewportBase* v) {
+    if (!v) return NULL;
+    if (v->ContainerKind() == 0)
+        return v->ViewportKind() == 1 ? (Viewport3D*)v : NULL;
+    ViewportBase* a = NULL;
+    ViewportBase* b = NULL;
+    if (v->ContainerKind() == 1) {
+        ViewportRow* r = (ViewportRow*)v; a = r->childA; b = r->childB;
+    } else if (v->ContainerKind() == 2) {
+        ViewportColumn* c = (ViewportColumn*)v; a = c->childA; b = c->childB;
+    }
+    Viewport3D* found = PrimerViewport3D(a);
+    return found ? found : PrimerViewport3D(b);
+}
+
+static void SeleccionarSubarbol(Object* o) {
+    if (!o) return;
+    o->Seleccionar();
+    for (size_t i = 0; i < o->Childrens.size(); i++) SeleccionarSubarbol(o->Childrens[i]);
+}
+
+static bool ContieneObjeto(Object* arbol, Object* buscado) {
+    if (!arbol) return false;
+    if (arbol == buscado) return true;
+    for (size_t i = 0; i < arbol->Childrens.size(); i++)
+        if (ContieneObjeto(arbol->Childrens[i], buscado)) return true;
+    return false;
+}
+
+static Resultado HerrSubjectCapture(const JVal* args) {
+    Resultado r;
+    const std::string rootName = Texto(Campo(args, "root"));
+    const std::string path = Texto(Campo(args, "path"));
+    Object* root = rootName.empty() ? ObjActivo : Buscar(SceneCollection, rootName);
+    if (!root) { r.error = true; r.texto = "subject_capture: root no encontrado"; return r; }
+    if (path.empty()) { r.error = true; r.texto = "subject_capture: falta path"; return r; }
+    if (!Viewport3DActive) Viewport3DActive = PrimerViewport3D(rootViewport);
+    if (!Viewport3DActive) { r.error = true; r.texto = "subject_capture: no hay viewport 3D en el layout"; return r; }
+
+    DeseleccionarTodo();
+    SeleccionarSubarbol(root);
+    ObjActivo = root;
+
+    const std::string view = Texto(Campo(args, "view"));
+    Viewport3DActive->SetViewFromCameraActive(false);
+    if (view == "right") Viewport3DActive->SetViewpoint(Viewpoint::right);
+    else if (view == "top") Viewport3DActive->SetViewpoint(Viewpoint::top);
+    else if (view == "back") Viewport3DActive->SetViewpoint(Viewpoint::back);
+    else if (view == "left") Viewport3DActive->SetViewpoint(Viewpoint::left);
+    else if (view == "bottom") Viewport3DActive->SetViewpoint(Viewpoint::bottom);
+    else Viewport3DActive->SetViewpoint(Viewpoint::front);
+    Viewport3DActive->EnfocarObject();
+
+    // La imagen de inspeccion no debe contener luces/camaras/gizmos ajenos al sujeto.
+    std::vector<Object*> ocultados;
+    if (SceneCollection) {
+        for (size_t i = 0; i < SceneCollection->Childrens.size(); i++) {
+            Object* top = SceneCollection->Childrens[i];
+            if (ContieneObjeto(top, root) || !top->visible) continue;
+            if (top->getType() == ObjectType::light || top->getType() == ObjectType::camera) continue;
+            top->visible = false;
+            ocultados.push_back(top);
+        }
+    }
+    const bool overlaysPrev = Viewport3DActive->showOverlays;
+    Viewport3DActive->SetShowOverlays(false);
+    DeseleccionarTodo();
+    ObjActivo = root;
+
+    const JVal* wv = Campo(args, "max_width");
+    int outW = (wv && wv->tipo == 1) ? (int)wv->num : 384;
+    if (outW < 64) outW = 64;
+    int outH = Viewport3DActive->width > 0
+             ? (outW * Viewport3DActive->height) / Viewport3DActive->width : outW;
+    if (outH < 64) outH = 64;
+    const JVal* mv = Campo(args, "margin_pct");
+    const int marginPct = (mv && mv->tipo == 1) ? (int)mv->num : 8;
+    const JVal* tv = Campo(args, "threshold");
+    const int threshold = (tv && tv->tipo == 1) ? (int)tv->num : 28;
+
+    std::vector<unsigned char> rgba;
+    Camera* cameraPrev = CameraActive;
+    CameraActive = NULL; // RenderABuffer: senza camera attiva usa l'orbita appena inquadrata del viewport
+    const bool rendered = Viewport3DActive->RenderABuffer(outW, outH, RenderType::Rendered, rgba);
+    CameraActive = cameraPrev;
+    Viewport3DActive->SetShowOverlays(overlaysPrev);
+    for (size_t i = 0; i < ocultados.size(); i++) ocultados[i]->visible = true;
+    if (!rendered || rgba.size() != (size_t)outW * outH * 4) {
+        r.error = true; r.texto = "subject_capture: RenderABuffer fallo"; return r;
+    }
+
+    unsigned bg[3] = {0,0,0};
+    const int sx[4] = {1, outW - 2, 1, outW - 2};
+    const int sy[4] = {1, 1, outH - 2, outH - 2};
+    for (int k = 0; k < 4; k++)
+        for (int c = 0; c < 3; c++)
+            bg[c] += rgba[((size_t)sy[k] * outW + sx[k]) * 4 + c];
+    for (int c = 0; c < 3; c++) bg[c] /= 4u;
+
+    int mnx = outW, mny = outH, mxx = -1, mxy = -1;
+    for (int y = 0; y < outH; y++)
+        for (int x = 0; x < outW; x++) {
+            const size_t q = ((size_t)y * outW + x) * 4;
+            const int d = abs((int)rgba[q] - (int)bg[0]) +
+                          abs((int)rgba[q + 1] - (int)bg[1]) +
+                          abs((int)rgba[q + 2] - (int)bg[2]);
+            if (d < threshold * 3) continue;
+            if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+            if (y < mny) mny = y; if (y > mxy) mxy = y;
+        }
+    if (mxx < mnx || mxy < mny) {
+        mnx = 0; mny = 0; mxx = outW - 1; mxy = outH - 1;
+    }
+    int bw = mxx - mnx + 1, bh = mxy - mny + 1;
+    int margen = ((bw > bh ? bw : bh) * marginPct) / 100;
+    if (margen < 3) margen = 3;
+    int cx = mnx - margen; if (cx < 0) cx = 0;
+    int cy = mny - margen; if (cy < 0) cy = 0;
+    int ex = mxx + margen + 1; if (ex > outW) ex = outW;
+    int ey = mxy + margen + 1; if (ey > outH) ey = outH;
+    const int cw = ex - cx, ch = ey - cy;
+
+    std::vector<unsigned char> rgb((size_t)cw * ch * 3);
+    for (int y = 0; y < ch; y++)
+        for (int x = 0; x < cw; x++)
+            for (int c = 0; c < 3; c++)
+                rgb[((size_t)y * cw + x) * 3 + c] =
+                    rgba[((size_t)(cy + y) * outW + (cx + x)) * 4 + c];
+    const std::string png = PngComprimido(rgb, cw, ch);
+
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) { r.error = true; r.texto = "subject_capture: cannot open " + path; return r; }
+    const size_t n = fwrite(png.data(), 1, png.size(), f);
+    const int closeRc = fclose(f);
+    if (n != png.size() || closeRc != 0) {
+        r.error = true; r.texto = "subject_capture: write failed " + path; return r;
+    }
+    char meta[192];
+    snprintf(meta, sizeof(meta), "render=%dx%d crop=%d,%d,%d,%d bytes=%lu",
+             outW, outH, cx, cy, cw, ch, (unsigned long)png.size());
+    r.texto = "subject_capture root=" + root->name + " view=" +
+              (view.empty() ? std::string("front") : view) + " path=" + path +
+              "\n" + meta;
+    return r;
+}
+
+static JVal* JStr(const std::string& s) { JVal* v=new JVal(); v->tipo=2; v->str=s; return v; }
+static JVal* JNum(double n) { JVal* v=new JVal(); v->tipo=1; v->num=n; return v; }
+
+static Resultado HerrSubjectMultiView(const JVal* args) {
+    Resultado r;
+    const std::string rootName=Texto(Campo(args,"root"));
+    const std::string base=Texto(Campo(args,"base_path"));
+    if(rootName.empty()||base.empty()){r.error=true;r.texto="subject_multiview requires root and base_path";return r;}
+    std::vector<std::string> views;
+    const JVal* vv=Campo(args,"views");
+    if(vv&&vv->tipo==5) for(size_t i=0;i<vv->lista.size();i++)
+        if(vv->lista[i]&&vv->lista[i]->tipo==2) views.push_back(vv->lista[i]->str);
+    if(views.empty()){views.push_back("front");views.push_back("right");views.push_back("back");views.push_back("left");views.push_back("top");}
+    const JVal* wv=Campo(args,"max_width");
+    const JVal* mv=Campo(args,"margin_pct");
+    const JVal* tv=Campo(args,"threshold");
+    const int w=(wv&&wv->tipo==1)?(int)wv->num:320;
+    const int margin=(mv&&mv->tipo==1)?(int)mv->num:8;
+    const int threshold=(tv&&tv->tipo==1)?(int)tv->num:28;
+    int ok=0;
+    for(size_t i=0;i<views.size();i++){
+        JVal a; a.tipo=4;
+        a.obj["root"]=JStr(rootName);
+        a.obj["path"]=JStr(base+"_"+views[i]+".png");
+        a.obj["view"]=JStr(views[i]);
+        a.obj["max_width"]=JNum(w);
+        a.obj["margin_pct"]=JNum(margin);
+        a.obj["threshold"]=JNum(threshold);
+        Resultado one=HerrSubjectCapture(&a);
+        if(one.error){
+            r.error=true;r.partialSuccess=ok>0;
+            r.texto+="FAIL "+views[i]+" "+one.texto+"\n";
+            break;
+        }
+        ok++;
+        r.texto+="OK "+views[i]+" "+one.texto+"\n";
+    }
+    if(!r.error) r.texto="subject_multiview count="+std::to_string(ok)+"\n"+r.texto;
     return r;
 }
 
@@ -711,6 +1000,183 @@ static bool BoolArg(const JVal* v, bool defecto = false) {
 static int IntArg(const JVal* v, int defecto) {
     return v && v->tipo == 1 ? (int)v->num : defecto;
 }
+
+static const JVal* Campo2(const JVal* o, const char* a, const char* b) {
+    const JVal* v = Campo(o, a);
+    return v ? v : Campo(o, b);
+}
+static std::string Texto2(const JVal* o, const char* a, const char* b) {
+    return Texto(Campo2(o, a, b));
+}
+static bool TransformarDirecto(Object* o, const JVal* op, std::string& err) {
+    if (!o) { err = "objeto no encontrado"; return false; }
+    float p[3], rot[3], e[3];
+    const JVal* pv = Campo2(op, "posicion", "position");
+    const JVal* rv = Campo2(op, "rotacion", "rotation");
+    const JVal* sv = Campo2(op, "escala", "scale");
+    const bool hp = Tres(pv, p), hr = Tres(rv, rot), hs = Tres(sv, e);
+    if (!hp && !hr && !hs) { err = "transform sin position/rotation/scale"; return false; }
+    UndoTransformIniciarObj(o);
+    if (hp) o->pos = Vector3(p[0], p[2], p[1]);
+    if (hr) o->SetRotEuler(Vector3(rot[0], rot[1], rot[2]));
+    if (hs) o->scale = Vector3(e[0], e[1], e[2]);
+    UndoTransformConfirmar();
+    return true;
+}
+static Resultado HerrObjectState(const JVal* args) {
+    Resultado r;
+    std::vector<std::string> nombres;
+    const JVal* nv = Campo2(args, "names", "nombres");
+    if (nv && nv->tipo == 5)
+        for (size_t i = 0; i < nv->lista.size(); i++)
+            if (nv->lista[i] && nv->lista[i]->tipo == 2 && !nv->lista[i]->str.empty())
+                nombres.push_back(nv->lista[i]->str);
+    const std::string uno = Texto2(args, "name", "nombre");
+    if (!uno.empty()) nombres.push_back(uno);
+    Object* refObj = ResolverObjeto(args);
+    if (nombres.empty() && refObj) {
+        r.texto = ResumenObjeto(refObj) + "\n";
+        return r;
+    }
+    if (nombres.empty() && ObjActivo) nombres.push_back(ObjActivo->name);
+    if (nombres.empty()) { r.error = true; r.texto = "object_state: falta name/names/id/ref y no hay activo"; return r; }
+    for (size_t i = 0; i < nombres.size(); i++) {
+        Object* o = Buscar(SceneCollection, nombres[i]);
+        if (!o) { r.error = true; r.texto += "MISS " + nombres[i] + "\n"; continue; }
+        r.texto += ResumenObjeto(o) + "\n";
+    }
+    if (r.texto.empty()) r.texto = "(sin objetos)";
+    return r;
+}
+static void IndexarEscenaRec(Object* o, const std::string& path, int depth,
+                             int maxDepth, const std::string& filter,
+                             int maxRows, int& rows, std::string& out) {
+    if (!o || rows >= maxRows) return;
+    const std::string type = W3dNombreTipo(o->getType());
+    std::string hay = o->name + " " + path + " " + type;
+    std::string low = hay;
+    for (size_t i=0;i<low.size();i++) low[i]=(char)tolower((unsigned char)low[i]);
+    std::string f = filter;
+    for (size_t i=0;i<f.size();i++) f[i]=(char)tolower((unsigned char)f[i]);
+    const bool match = f.empty() || low.find(f) != std::string::npos;
+    if (match) {
+        const Vector3& p=o->pos; const Vector3& r=o->rotEuler; const Vector3& sc=o->scale;
+        const Vector3 wp=o->GetGlobalPosition();
+        Vector3 mn,mx; const bool hasBounds=W3dBoundsSubarbol(o,mn,mx);
+        char b[1024];
+        snprintf(b,sizeof(b),
+                 "@%u path=%s type=%s parent=@%u child=%lu vis=%d sel=%d "
+                 "Lpos=%.4g,%.4g,%.4g Lrot=%.4g,%.4g,%.4g S=%.4g,%.4g,%.4g "
+                 "Wpos=%.4g,%.4g,%.4g",
+                 o->serial,path.c_str(),type.c_str(),
+                 (o->Parent && o->Parent!=SceneCollection)?o->Parent->serial:0u,
+                 (unsigned long)o->Childrens.size(),o->visible?1:0,o->select?1:0,
+                 p.x,p.z,p.y,r.x,r.y,r.z,sc.x,sc.y,sc.z,wp.x,wp.z,wp.y);
+        out+=b;
+        if (hasBounds) {
+            char bb[320];
+            snprintf(bb,sizeof(bb),
+                     " bounds=%.4g,%.4g,%.4g..%.4g,%.4g,%.4g size=%.4g,%.4g,%.4g",
+                     mn.x,mn.z,mn.y,mx.x,mx.z,mx.y,
+                     mx.x-mn.x,mx.z-mn.z,mx.y-mn.y);
+            out+=bb;
+        } else out+=" bounds=-";
+        if (o->getType()==ObjectType::mesh) {
+            Mesh* m=(Mesh*)o;
+            char mb[128];
+            snprintf(mb,sizeof(mb)," mesh_v=%d mesh_f=%lu",m->vertexSize,(unsigned long)m->faces3d.size());
+            out+=mb;
+        }
+        if (o->fisica) {
+            static const char* kT[]={"static","dynamic","character","mesh"};
+            const int ti=o->fisica->tipo & 3;
+            char pb[256];
+            snprintf(pb,sizeof(pb),
+                     " phys=%s mass=%.4g collision=%.4g,%.4g,%.4g center=%.4g,%.4g,%.4g",
+                     kT[ti],o->fisica->masa,
+                     o->fisica->caja[0],o->fisica->caja[2],o->fisica->caja[1],
+                     o->fisica->centro[0],o->fisica->centro[2],o->fisica->centro[1]);
+            out+=pb;
+        } else out+=" phys=-";
+        out+="\n"; rows++;
+    }
+    if (depth>=maxDepth) return;
+    for (size_t i=0;i<o->Childrens.size() && rows<maxRows;i++) {
+        Object* c=o->Childrens[i];
+        IndexarEscenaRec(c,path+"/"+c->name,depth+1,maxDepth,filter,maxRows,rows,out);
+    }
+}
+
+static Resultado HerrSceneIndex(const JVal* args) {
+    Resultado r;
+    Object* root=ResolverObjeto(args,"root","raiz","root_id","root_ref");
+    if (!root) root=SceneCollection;
+    const int maxDepth=IntArg(Campo(args,"depth"),64);
+    int maxRows=IntArg(Campo(args,"max"),300); if(maxRows<1) maxRows=1;
+    const std::string filter=Texto(Campo(args,"filter"));
+    int rows=0;
+    if (root==SceneCollection) {
+        for(size_t i=0;i<SceneCollection->Childrens.size() && rows<maxRows;i++) {
+            Object* c=SceneCollection->Childrens[i];
+            IndexarEscenaRec(c,c->name,0,maxDepth,filter,maxRows,rows,r.texto);
+        }
+    } else IndexarEscenaRec(root,root->name,0,maxDepth,filter,maxRows,rows,r.texto);
+    r.texto="scene_index rows="+std::to_string(rows)+"\n"+r.texto;
+    return r;
+}
+
+static Resultado HerrSceneBatch(const JVal* args) {
+    Resultado r;
+    const JVal* ops = Campo(args, "ops");
+    if (!ops || ops->tipo != 5) { r.error = true; r.texto = "scene_batch: ops debe ser un array"; return r; }
+    int creados = 0, movidos = 0, padres = 0, seleccionados = 0;
+    for (size_t i = 0; i < ops->lista.size(); i++) {
+        const JVal* op = ops->lista[i];
+        if (!op || op->tipo != 4) { r.error = true; r.partialSuccess = i > 0; r.texto = "scene_batch item invalido"; break; }
+        const std::string accion = Texto2(op, "op", "action");
+        std::string err;
+        if (accion == "create") {
+            Resultado a = HerrAgregar(Texto2(op, "tipo", "type"));
+            if (a.error || !ObjActivo) { err = a.texto; }
+            else {
+                const std::string nombre = Texto2(op, "nombre", "name");
+                if (!nombre.empty()) W3dRenombrarObjeto(ObjActivo, nombre, false);
+                if (Campo2(op, "posicion", "position") || Campo2(op, "rotacion", "rotation") || Campo2(op, "escala", "scale"))
+                    if (!TransformarDirecto(ObjActivo, op, err)) {}
+                if (err.empty()) creados++;
+            }
+        } else if (accion == "transform") {
+            Object* o = ResolverObjeto(op,"nombre","name","id","ref");
+            if (!TransformarDirecto(o, op, err)) {}
+            else movidos++;
+        } else if (accion == "parent_keep") {
+            Object* c = ResolverObjeto(op,"child","hijo","child_id","child_ref");
+            Object* p = ResolverObjeto(op,"parent","padre","parent_id","parent_ref");
+            if (!c || !p) err = "parent_keep: child/parent no encontrado";
+            else { ReparentKeepTransform(c, p); if (c->Parent != p) err = "parent_keep fallo"; else padres++; }
+        } else if (accion == "select") {
+            Object* o = ResolverObjeto(op,"nombre","name","id","ref");
+            if (!o) err = "select: objeto no encontrado";
+            else { DeseleccionarTodo(); o->Seleccionar(); ObjActivo = o; seleccionados++; }
+        } else err = "op desconocida: " + accion;
+
+        if (!err.empty()) {
+            char b[64]; snprintf(b, sizeof(b), "scene_batch FAIL item=%lu ", (unsigned long)i);
+            r.texto = b + err;
+            r.error = true; r.partialSuccess = i > 0;
+            break;
+        }
+    }
+    { extern bool g_objetosMovidos; g_objetosMovidos = true; }
+    g_redraw = true;
+    if (!r.error) {
+        char b[192];
+        snprintf(b, sizeof(b), "scene_batch ok=%lu create=%d transform=%d parent=%d select=%d",
+                 (unsigned long)ops->lista.size(), creados, movidos, padres, seleccionados);
+        r.texto = b;
+    }
+    return r;
+}
 static std::string Minusculas(std::string s) {
     for (size_t i = 0; i < s.size(); i++) s[i] = (char)tolower((unsigned char)s[i]);
     return s;
@@ -765,7 +1231,7 @@ static const char* const kHerramientasNativas[] = {
     "workspace_status", "session_open", "session_plan", "session_switch", "session_close",
     "task_open", "task_switch", "task_suspend", "task_resume", "task_commit", "task_close",
     "session_test", "menu_execute", "shortcut", "input",
-    "escena", "captura", "capture_file", "object_create", "parent_keep", "agregar_objeto", "seleccionar", "transformar",
+    "escena", "scene_index", "object_state", "scene_batch", "captura", "capture_file", "subject_capture", "subject_multiview", "object_create", "parent_keep", "agregar_objeto", "seleccionar", "transformar",
     "borrar_seleccion", "deshacer", "abrir_proyecto", "guardar_proyecto",
     "importar_modelo", "command", "comando"
 };
@@ -932,7 +1398,7 @@ static Resultado DesdeWorkspace(const W3dLlmWorkspaceResult& w) {
 
 static bool HerramientaMuta(const std::string& nombre) {
     return nombre == "menu_execute" || nombre == "shortcut" || nombre == "input" ||
-           nombre == "object_create" || nombre == "parent_keep" || nombre == "agregar_objeto" || nombre == "seleccionar" || nombre == "transformar" ||
+           nombre == "scene_batch" || nombre == "object_create" || nombre == "parent_keep" || nombre == "agregar_objeto" || nombre == "seleccionar" || nombre == "transformar" ||
            nombre == "borrar_seleccion" || nombre == "deshacer" ||
            nombre == "abrir_proyecto" || nombre == "guardar_proyecto" ||
            nombre == "importar_modelo" || nombre == "command" || nombre == "comando";
@@ -1412,13 +1878,18 @@ static const char* kHerramientas = R"JSON([
 {"name":"shortcut","description":"Invoke any registered editor shortcut by stable shortcut id using the editor's real input path and current context.","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}},
 {"name":"input","description":"Inject generic editor input through the real SDL input path. Types: key (valor like Ctrl+S), mouse_move, mouse_button, wheel. This is the unrestricted UI fallback when no semantic command exists.","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["key","mouse_move","mouse_button","wheel"]},"valor":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},"dx":{"type":"integer"},"dy":{"type":"integer"},"boton":{"type":"string","enum":["left","middle","right"]},"down":{"type":"boolean"}},"required":["tipo"]}},
 {"name":"escena","description":"El arbol de objetos de la escena de Whisk3D: nombre, tipo, posicion, rotacion (euler en grados), escala, y cual esta seleccionado y cual es el activo. Las coordenadas son las del panel Propiedades: Z para arriba.","inputSchema":{"type":"object","properties":{}}},
+{"name":"scene_index","description":"Indice strutturato della scena con riferimenti runtime stabili @serial, path gerarchico, parent/children, transform, world bounds e dimensioni del sottoalbero, mesh stats e corpo fisico/collision box. root/root_ref limita a un gruppo; filter e depth riducono output.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"root_ref":{"type":["string","number"]},"filter":{"type":"string"},"depth":{"type":"integer"},"max":{"type":"integer"}}}},
+{"name":"object_state","description":"Estado numerico compatto di uno o molti oggetti. Accetta name/names oppure id/ref @serial restituiti da scene_index.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"names":{"type":"array","items":{"type":"string"}},"id":{"type":"number"},"ref":{"type":["string","number"]}}}}},
+{"name":"scene_batch","description":"Esegue in una singola chiamata molte operazioni create/transform/parent_keep/select e restituisce solo contatori. Accetta nomi inglesi o spagnoli dei campi; ideale per rig e modelli grandi.","inputSchema":{"type":"object","properties":{"ops":{"type":"array","items":{"type":"object"}}},"required":["ops"]}},
 {"name":"captura","description":"Una imagen PNG de lo que muestra el editor, para ver el resultado. Por defecto solo la vista 3D activa; con zona='ventana', el editor entero. Se achica hasta ancho_max pixeles (800 si no se dice).","inputSchema":{"type":"object","properties":{"zona":{"type":"string","enum":["vista3d","ventana"]},"ancho_max":{"type":"integer"}}}},
-{"name":"capture_file","description":"Guarda el framebuffer actual en un PNG exacto y devuelve solo path, dimensiones y bytes, sin base64. zona=3d captura solo el viewport 3D; zona=ventana captura la ventana completa.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"zona":{"type":"string","enum":["3d","ventana"]},"ancho_max":{"type":"integer","minimum":64}},"required":["path"]}},
+{"name":"capture_file","description":"Guarda una captura PNG ligera y devuelve solo path/dimensiones/bytes. Por defecto recorta automaticamente la superficie util respecto del fondo y limita a 480 px; sin base64.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"zona":{"type":"string","enum":["3d","ventana"]},"ancho_max":{"type":"integer","minimum":64},"crop":{"type":"boolean"},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["path"]}},
+{"name":"subject_capture","description":"Inquadra direttamente un sottoalbero nel viewport 3D senza dipendere dal focus GUI, sceglie vista front/right/top/back/left/bottom, ritaglia automaticamente la superficie utile e salva un PNG leggero senza base64.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"path":{"type":"string"},"view":{"type":"string","enum":["front","right","top","back","left","bottom"]},"max_width":{"type":"integer","minimum":64},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["root","path"]}},
+{"name":"subject_multiview","description":"Genera in una chiamata viste auto-inquadrate e auto-croppate del solo sottoalbero. Default: front/right/back/left/top. Scrive base_path_<view>.png e non invia base64.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"base_path":{"type":"string"},"views":{"type":"array","items":{"type":"string","enum":["front","right","top","back","left","bottom"]}},"max_width":{"type":"integer","minimum":64},"margin_pct":{"type":"integer"},"threshold":{"type":"integer"}},"required":["root","base_path"]}},
 {"name":"object_create","description":"Crea una primitiva, la nombra y aplica posicion/rotacion/escala en una sola llamada. Devuelve el estado final del objeto; usa coordenadas del panel Propiedades (Z arriba).","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["cube","plane","circle","uvsphere","cone","cylinder","vertex","empty","camera","light"]},"nombre":{"type":"string"},"posicion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotacion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"escala":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["tipo","nombre"]}},
 {"name":"parent_keep","description":"Reparenta un objeto conservando exactamente su transformacion global. Util para construir rigs/jerarquias sin mover las piezas.","inputSchema":{"type":"object","properties":{"child":{"type":"string"},"parent":{"type":"string"}},"required":["child","parent"]}},
 {"name":"agregar_objeto","description":"Agrega un objeto en el cursor 3D, como el menu Add. Queda seleccionado y activo.","inputSchema":{"type":"object","properties":{"tipo":{"type":"string","enum":["cube","plane","circle","uvsphere","cone","cylinder","vertex","empty","camera","light"]}},"required":["tipo"]}},
 {"name":"seleccionar","description":"Selecciona un objeto por su nombre y lo deja activo (las herramientas que no reciben nombre actuan sobre el activo). Con agregar=true suma a la seleccion; sin nombre, deselecciona todo.","inputSchema":{"type":"object","properties":{"nombre":{"type":"string"},"agregar":{"type":"boolean"}}}},
-{"name":"transformar","description":"Cambia la posicion, la rotacion (euler en grados) o la escala de un objeto (por nombre, o el activo), con las coordenadas del panel Propiedades (Z para arriba). Solo cambia lo que se pasa. Se deshace con Ctrl+Z.","inputSchema":{"type":"object","properties":{"nombre":{"type":"string"},"posicion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotacion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"escala":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}}}},
+{"name":"transformar","description":"Cambia transform de un objeto y devuelve una sola linea compacta; verbose=true imprime el subarbol completo. Coordenadas del panel, Z arriba.","inputSchema":{"type":"object","properties":{"nombre":{"type":"string"},"posicion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"rotacion":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"escala":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"verbose":{"type":"boolean"}}}},
 {"name":"borrar_seleccion","description":"Borra los objetos seleccionados (se deshace con Ctrl+Z).","inputSchema":{"type":"object","properties":{}}},
 {"name":"deshacer","description":"Deshace la ultima accion (Ctrl+Z), o la rehace con rehacer=true.","inputSchema":{"type":"object","properties":{"rehacer":{"type":"boolean"}}}},
 {"name":"abrir_proyecto","description":"Abre un proyecto .w3d (cierra el actual).","inputSchema":{"type":"object","properties":{"ruta":{"type":"string"}},"required":["ruta"]}},
@@ -1472,7 +1943,12 @@ static Resultado Llamar(const std::string& nombre, const JVal* args) {
     if (nombre == "shortcut") return HerrShortcut(Texto(Campo(args, "id")));
     if (nombre == "input") return HerrInput(args);
     if (nombre == "escena") return HerrEscena();
+    if (nombre == "scene_index") return HerrSceneIndex(args);
+    if (nombre == "object_state") return HerrObjectState(args);
+    if (nombre == "scene_batch") return HerrSceneBatch(args);
     if (nombre == "capture_file") return HerrCaptureFile(args);
+    if (nombre == "subject_capture") return HerrSubjectCapture(args);
+    if (nombre == "subject_multiview") return HerrSubjectMultiView(args);
     if (nombre == "captura") {
         const JVal* am = Campo(args, "ancho_max");
         return HerrCaptura(Texto(Campo(args, "zona")) != "ventana", (am && am->tipo == 1) ? (int)am->num : 800);
