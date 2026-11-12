@@ -1,9 +1,11 @@
 [submodule "libs/Whisk3DCore"]
 	path = libs/Whisk3DCore
-	url = https://github.com/Dante-Leoncini/Whisk3Dcore
+	url = https://github.com/olmox001/NX-Whisk3D-Core-Plus.git
+	branch = main
 [submodule "libs/WhiskUI"]
 	path = libs/WhiskUI
-	url = https://github.com/Dante-Leoncini/Whisk3D-UI
+	url = https://github.com/olmox001/NX-Whisk3D-UI-Plus.git
+	branch = main
 [submodule "thirdparty/SDL2"]
 	path = thirdparty/SDL2
 	url = https://github.com/libsdl-org/SDL
