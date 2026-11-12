@@ -396,11 +396,11 @@ void W3dControlesAbrirLosQueHay() {
 // foco (alt-tab) se las suelta todas (SDL no manda el KEY_UP de lo que se suelta afuera)
 static std::set<int> gTeclasJuego;
 #ifdef W3D_MCP
-#include "test/W3dHistorial.h"   // la grabadora de pasos (W3D_HISTORIAL=<ruta>): anota cada tecla y cada click
+#include "extensions/W3dLlmHistory.h"   // la grabadora de pasos (W3D_LLM_HISTORY=<path>): anota cada tecla y cada click
 #endif
 void InputUsuarioSDL3(SDL_Event &e){
 #ifdef W3D_MCP
-    if (W3dHistorialActivo()) W3dHistorialEvento(e);   // ANTES de procesarlo: lo que hay debajo del click
+    if (W3dLlmHistoryActivo()) W3dLlmHistoryEvento(e);   // ANTES de procesarlo: lo que hay debajo del click
 #endif
     if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_FOCUS_LOST && !gTeclasJuego.empty()) {
         extern void SimTeclaSDL(int, bool);

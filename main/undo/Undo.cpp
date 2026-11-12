@@ -1917,7 +1917,7 @@ static void Push(UndoCmd* c) {
     if (g_undoSinRaiz <= 0) c->raizDe = SceneCollection;
     g_undo.push_back(c);
 #ifdef W3D_MCP
-    { extern void W3dHistorialUndo(const char*); W3dHistorialUndo(typeid(*c).name()); }   // la grabadora de pasos
+    { extern void W3dLlmHistoryUndo(const char*); W3dLlmHistoryUndo(typeid(*c).name()); }   // la grabadora de pasos
 #endif
     DesalojarViejos();
     if (g_undoSinRaiz <= 0) W3dCambiosTocado();

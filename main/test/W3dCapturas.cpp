@@ -1,6 +1,6 @@
 // Comandos de harness para las capturas de los tutoriales (ver W3dCapturas.h y tools/capturas/README.md).
 #include "test/W3dCapturas.h"
-#include "test/W3dHistorial.h"        // W3dHistorialCuadro (la grabadora de pasos, tambien en el harness)
+#include "extensions/W3dLlmHistory.h"   // grabador de historial, tambien usado por el harness
 #include "app/controles.h"            // SDL_Event + InputUsuarioSDL3: la puerta real de la entrada
 #include "app/variables.h"            // window
 #include "ViewPorts/ViewPorts.h"      // ViewportBase / ViewportColumn (el arbol del layout)
@@ -77,7 +77,7 @@ namespace {
         rootViewport->Render();
         LayoutRenderMenu(MenuPantallaW, MenuPantallaH);
 #ifdef W3D_MCP
-        W3dHistorialCuadro();   // la grabadora de pasos (W3D_HISTORIAL): como en el loop del editor
+        W3dLlmHistoryCuadro();   // la grabadora de pasos (W3D_LLM_HISTORY): como en el loop del editor
 #endif
     }
 

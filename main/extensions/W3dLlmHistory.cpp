@@ -1,7 +1,7 @@
-// La GRABADORA DE PASOS (ver W3dHistorial.h): W3D_HISTORIAL=<ruta.txt> anota lo que la persona hace en el editor.
+// Grabador del historial de acciones LLM/editor. Ver W3dLlmHistory.h.
 #ifdef W3D_MCP
 
-#include "test/W3dHistorial.h"
+#include "extensions/W3dLlmHistory.h"
 #include "app/variables.h"            // cursor3D, transformOrientation, EditSelectMode
 #include "ViewPorts/ViewPorts.h"      // ViewportBase, FindViewportUnderMouse, BarButtons / ToolButtons
 #include "ViewPorts/ViewPort3D.h"     // Viewport3D
@@ -45,7 +45,7 @@ static int g_downX = 0, g_downY = 0, g_downBoton = 0;
 static bool g_down = false;
 static int g_rueda = 0;
 
-bool W3dHistorialActivo() { return g_f != NULL; }
+bool W3dLlmHistoryActivo() { return g_f != NULL; }
 
 static void Linea(const char* fmt, ...) {
     if (!g_f) return;
@@ -67,11 +67,12 @@ static void SoltarRueda() {
     g_rueda = 0;
 }
 
-void W3dHistorialIniciar() {
-    const char* ruta = getenv("W3D_HISTORIAL");
+void W3dLlmHistoryIniciar() {
+    const char* ruta = getenv("W3D_LLM_HISTORY");
+    if (!ruta || !*ruta) ruta = getenv("W3D_HISTORIAL"); // compatibilidad con el nombre anterior del grabador
     if (!ruta || !*ruta) return;
     g_f = fopen(ruta, "a");
-    if (!g_f) { fprintf(stderr, "W3D_HISTORIAL: no se pudo abrir '%s'\n", ruta); return; }
+    if (!g_f) { fprintf(stderr, "W3D_LLM_HISTORY: cannot open '%s'\n", ruta); return; }
     g_t0 = SDL_GetTicks();
     fprintf(g_f, "\n==== grabadora de pasos de Whisk3D ====\n"
                  "(posiciones y medidas como en Propiedades: X, Y, Z con Z arriba, en metros)\n");
@@ -220,7 +221,7 @@ static std::string QueHay(int mx, int my) {
 static void Pendiente();
 static const char* NombreBoton(int b) { return b == 1 ? "izquierdo" : b == 2 ? "del medio" : b == 3 ? "derecho" : "?"; }
 
-void W3dHistorialEvento(const SDL_Event& e) {
+void W3dLlmHistoryEvento(const SDL_Event& e) {
     if (!g_f) return;
     switch (e.type) {
         case SDL_KEYDOWN: {
@@ -287,7 +288,7 @@ static void MenuElegido(const PopupMenu* m, const MenuItem* it) {
     g_pend = 1;
 }
 
-void W3dHistorialUndo(const char* tipo) {
+void W3dLlmHistoryUndo(const char* tipo) {
     if (!g_f || !tipo) return;
     std::string n = tipo;
 #ifdef __GNUC__
@@ -436,7 +437,7 @@ static void Instantanea() {
 // lo pendiente de la accion anterior, ANTES de anotar la siguiente (el editor en reposo no dibuja cuadros de mas)
 static void Pendiente() { if (g_pend > 0 && Quieto()) Instantanea(); }
 
-void W3dHistorialCuadro() {
+void W3dLlmHistoryCuadro() {
     if (!g_f) return;
     // el gancho de los menus (WhiskUI no conoce al editor): se instala aca, una vez
     if (!W3dMenuElegidoHook) W3dMenuElegidoHook = MenuElegido;

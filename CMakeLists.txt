@@ -180,10 +180,42 @@ if(ANDROID)
 endif()
 
 # ---------------------------------------------------
+# Catalogo de comandos LLM
+# ---------------------------------------------------
+# La extension LLM no mantiene una lista blanca manual. El catalogo se genera
+# a partir de todos los dispatchers de main/test/*.cpp, de modo que cada nuevo
+# comando W3dRunCommand queda disponible para el descubrimiento automaticamente.
+if(NOT ANDROID AND NOT EMSCRIPTEN)
+    file(GLOB W3D_LLM_CATALOG_INPUTS CONFIGURE_DEPENDS
+        ${CMAKE_SOURCE_DIR}/main/test/*.cpp
+        ${CMAKE_SOURCE_DIR}/tools/pruebas/*.w3s
+    )
+    set(W3D_LLM_CATALOG_DIR ${CMAKE_BINARY_DIR}/generated)
+    set(W3D_LLM_CATALOG_INC ${W3D_LLM_CATALOG_DIR}/W3dLlmCommandCatalog.inc)
+    add_custom_command(
+        OUTPUT ${W3D_LLM_CATALOG_INC}
+        COMMAND ${CMAKE_COMMAND}
+            -DINPUT_DIR=${CMAKE_SOURCE_DIR}/main/test
+            -DOUTPUT=${W3D_LLM_CATALOG_INC}
+            -P ${CMAKE_SOURCE_DIR}/main/extensions/GenerateLlmCatalog.cmake
+        DEPENDS ${W3D_LLM_CATALOG_INPUTS}
+                ${CMAKE_SOURCE_DIR}/main/extensions/GenerateLlmCatalog.cmake
+        VERBATIM
+    )
+    set_source_files_properties(${W3D_LLM_CATALOG_INC}
+        PROPERTIES GENERATED TRUE HEADER_FILE_ONLY TRUE)
+    list(APPEND SRC_FILES ${W3D_LLM_CATALOG_INC})
+endif()
+
+# ---------------------------------------------------
 # Executable
 # ---------------------------------------------------
 
 add_executable(whisk3d ${SRC_FILES})
+
+if(NOT ANDROID AND NOT EMSCRIPTEN)
+    target_include_directories(whisk3d PRIVATE ${W3D_LLM_CATALOG_DIR})
+endif()
 
 if(MSVC)
     target_compile_options(whisk3d PRIVATE /W4)
@@ -195,8 +227,8 @@ add_dependencies(whisk3d w3dversion)
 # AUDIO habilitado (efectos del juego via SDL2, ya linkeado). Sin esto el modulo es stub.
 target_compile_definitions(whisk3d PRIVATE W3D_ENABLE_AUDIO)
 
-# MCP (whisk3d --mcp, main/test/W3dMcp.cpp): el editor atiende a una IA por stdin/stdout. Solo en la PC: Android y la
-# web no lo compilan (y Symbian, Dreamcast y 3DS tienen su propio build, sin main/test)
+# Control LLM por terminal/MCP (whisk3d --llm / --mcp, main/extensions/W3dLlmControl.cpp).
+# Solo escritorio: Android/Web y los builds de consola heredados no incluyen la extension.
 if(NOT ANDROID AND NOT EMSCRIPTEN)
     target_compile_definitions(whisk3d PRIVATE W3D_MCP)
 endif()

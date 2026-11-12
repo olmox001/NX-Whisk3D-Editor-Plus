@@ -11,9 +11,10 @@
 #include "WhiskUI/widgets/TextField.h"   // TextFieldParpadeoTick (el cursor que parpadea)   // RenderType / g_redraw: son del editor
 #include "W3dLang.h"   // config.ini: "idioma = es" fuerza el idioma por encima del SO
 #include "test/W3dScript.h" // modo test: whisk3d --script <ruta>
-#include "test/W3dMcp.h"
+#include "extensions/W3dLlmControl.h"
 #ifdef W3D_MCP
-#include "test/W3dHistorial.h"   // la grabadora de pasos (W3D_HISTORIAL=<ruta>)
+#include "extensions/W3dLlmHistory.h"
+#include "extensions/W3dLlmWorkspace.h"   // sesiones/tareas persistentes del agente LLM
 #endif    // whisk3d --mcp: el editor atiende a una IA (Model Context Protocol, solo en la PC)
 #include "io/CambiosProyecto.h" // lo no guardado: el cartel al cerrar y el '*' del titulo
 
@@ -801,12 +802,12 @@ static void ProcesarEvento(SDL_Event& e) {
 
 static void MainLoopFrame() {
 #ifdef W3D_MCP
-    W3dHistorialCuadro();   // la grabadora de pasos: lo que cambio (sin W3D_HISTORIAL no hace nada)
+    W3dLlmHistoryCuadro();   // la grabadora de pasos: lo que cambio (sin W3D_LLM_HISTORY no hace nada)
     // el MCP (--mcp): los pedidos de la IA se atienden aca, entre cuadros. Si el cliente se va, el editor se cierra
     // por la misma puerta que la cruz de la ventana (con el cartel si hay cambios sin guardar)
-    if (W3dMcpActivo()) {
+    if (W3dLlmActivo()) {
         static bool clienteIdo = false;
-        if (!W3dMcpAtender() && !clienteIdo) {
+        if (!W3dLlmAtender() && !clienteIdo) {
             clienteIdo = true;
             SDL_Event q; SDL_zero(q); q.type = SDL_QUIT; SDL_PushEvent(&q);
         }
@@ -1226,15 +1227,22 @@ namespace w3dEngine { bool W3dAudioInit(int); }  // audio/W3dAudio.h (evita mete
 
 int main(int argc, char* argv[]) {
 #ifdef W3D_MCP
-    // --mcp: antes que nada imprima, stdin y stdout pasan a ser del protocolo (ver test/W3dMcp.cpp)
-    for (int ai = 1; ai < argc; ai++)
-        if (std::string(argv[ai]) == "--mcp" && !W3dMcpIniciar()) { fprintf(stderr, "whisk3d --mcp: no se pudo iniciar\n"); return 1; }
+    // El control LLM toma stdin/stdout antes de que imprima otro subsistema. --mcp
+    // usa MCP estricto; --llm agrega una linea JSON de arranque para un agente de
+    // terminal y luego acepta las mismas peticiones JSON-RPC/MCP.
+    for (int ai = 1; ai < argc; ai++) {
+        const std::string arg = argv[ai];
+        if ((arg == "--llm" || arg == "--mcp") && !W3dLlmIniciar(arg == "--llm")) {
+            fprintf(stderr, "whisk3d %s: no se pudo iniciar\n", arg.c_str());
+            return 1;
+        }
+    }
 #endif
 #ifndef __EMSCRIPTEN__
     w3dRedirigirCoutAlLog();   // cout/cerr -> whisk3d.log (no la consola blanca de Windows). Impl comun en w3dlog.cpp.
 #endif
 #ifdef W3D_MCP
-    W3dHistorialIniciar();     // W3D_HISTORIAL=<ruta.txt>: anota los pasos de la persona (para armar tutoriales)
+    W3dLlmHistoryIniciar();     // W3D_LLM_HISTORY=<path>: anota los pasos de la persona (para armar tutoriales)
 #endif
 #ifdef __EMSCRIPTEN__
     SDL_SetMainReady(); // web: no arrancamos por el main de SDL
@@ -1337,6 +1345,13 @@ int main(int argc, char* argv[]) {
         if (pref) { w3dFileSystem::SetUserDataDir(pref); SDL_free(pref); }
     #endif
     }
+
+#ifdef W3D_MCP
+    // El workspace persistente necesita la ruta final escribible del usuario.
+    // Se carga despues de configurar GetUserDataDir, no durante el arranque
+    // del transporte --llm/--mcp.
+    if (W3dLlmActivo()) W3dLlmWorkspaceInit();
+#endif
 
     // Android: los recursos van dentro del APK (assets). El Core los lee con el
     // AAssetManager del NDK (NO SDL); aca -en la capa de plataforma, que si usa
